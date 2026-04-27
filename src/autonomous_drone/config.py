@@ -16,7 +16,7 @@ class CameraConfig:
     height: int = 640
     horizontal_fov_deg: float = 62.0
     vertical_fov_deg: float = 49.0
-    mount_pitch_deg: float = 0.0
+    mount_pitch_deg: float = 10.0
 
 
 @dataclass(slots=True)
@@ -38,14 +38,16 @@ class TrackingConfig:
     model_path: str = "models/yolo11n.pt"
     detector_confidence: float = 0.40
     person_class_id: int = 0
-    min_box_area_ratio: float = 0.015
+    min_box_area_ratio: float = 0.002
     desired_box_area_ratio: float = 0.080
     emergency_stop_area_ratio: float = 0.180
-    loss_timeout_s: float = 0.60
+    loss_timeout_s: float = 2
     acquisition_confirm_frames: int = 3
     tracker_frame_rate: float = 10.0
     tracker_track_buffer: int = 30
-    tracker_match_thresh: float = 0.80
+    tracker_match_thresh: float = 0.60
+    selector_reacquire_min_iou: float = 0.10
+    selector_reacquire_max_center_shift_ratio: float = 0.90
 
 
 @dataclass(slots=True)
@@ -61,8 +63,8 @@ class ControlConfig:
     yaw_deadband_deg: float = 4.0
     horizontal_alignment_window_deg: float = 10.0
     box_area_deadband_ratio: float = 0.012
-    max_forward_speed_m_s: float = 0.80
-    max_reverse_speed_m_s: float = 0.20
+    max_forward_speed_m_s: float = 1.5
+    max_reverse_speed_m_s: float = 1.5
     max_lateral_speed_m_s: float = 0.15
     max_vertical_speed_m_s: float = 0.0
     max_yaw_rate_deg_s: float = 12.0

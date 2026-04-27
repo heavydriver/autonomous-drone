@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Iterable, List
+from typing import Iterable, List, Sequence
 
 from autonomous_drone.config import TrackingConfig
 from autonomous_drone.models import BoundingBox, Detection, TargetObservation, Track
@@ -14,39 +14,156 @@ from autonomous_drone.models import BoundingBox, Detection, TargetObservation, T
 class PrimaryTargetSelector:
     """Keep target identity stable by preferring the current lock."""
 
+    config: TrackingConfig
     active_track_id: int | None = None
+    _last_bbox: BoundingBox | None = None
+    _next_virtual_track_id: int = -1
 
-    def select(self, tracks: Iterable[Track], now_s: float) -> TargetObservation | None:
+    def select(
+        self,
+        tracks: Iterable[Track],
+        detections: Iterable[Detection],
+        now_s: float,
+    ) -> TargetObservation | None:
         """Select the primary target from tracked people.
 
         Args:
             tracks: Current frame tracks.
+            detections: Current frame raw detections.
             now_s: Monotonic timestamp in seconds.
 
         Returns:
-            The selected target observation, or ``None`` if no tracks exist.
+            The selected target observation, or ``None`` if no plausible target exists.
         """
 
         track_list = list(tracks)
-        if not track_list:
+        detection_list = list(detections)
+        if not track_list and not detection_list:
             return None
         if self.active_track_id is not None:
             for track in track_list:
                 if track.track_id == self.active_track_id:
-                    return TargetObservation(
-                        track_id=track.track_id,
+                    return self._build_observation(
                         bbox=track.bbox,
                         confidence=track.confidence,
-                        timestamp_s=now_s,
+                        now_s=now_s,
                     )
+
+            reacquired_track = self._find_best_track_match(track_list)
+            if reacquired_track is not None:
+                return self._build_observation(
+                    bbox=reacquired_track.bbox,
+                    confidence=reacquired_track.confidence,
+                    now_s=now_s,
+                )
+
+            fallback_detection = self._find_best_detection_match(detection_list)
+            if fallback_detection is not None:
+                return self._build_observation(
+                    bbox=fallback_detection.bbox,
+                    confidence=fallback_detection.confidence,
+                    now_s=now_s,
+                )
+
+        if not track_list:
+            if detection_list and self.active_track_id is None:
+                selected_detection = max(detection_list, key=lambda detection: detection.bbox.area)
+                self.active_track_id = self._allocate_virtual_track_id()
+                return self._build_observation(
+                    bbox=selected_detection.bbox,
+                    confidence=selected_detection.confidence,
+                    now_s=now_s,
+                )
+            return None
+
         selected = max(track_list, key=lambda track: track.bbox.area)
         self.active_track_id = selected.track_id
-        return TargetObservation(
-            track_id=selected.track_id,
+        return self._build_observation(
             bbox=selected.bbox,
             confidence=selected.confidence,
+            now_s=now_s,
+        )
+
+    def _build_observation(
+        self,
+        bbox: BoundingBox,
+        confidence: float,
+        now_s: float,
+    ) -> TargetObservation:
+        """Store selector state and return a controller observation."""
+
+        self._last_bbox = bbox
+        if self.active_track_id is None:
+            raise RuntimeError("active_track_id must be set before building an observation")
+        return TargetObservation(
+            track_id=self.active_track_id,
+            bbox=bbox,
+            confidence=confidence,
             timestamp_s=now_s,
         )
+
+    def _allocate_virtual_track_id(self) -> int:
+        """Return a synthetic track id for detection-only target locks."""
+
+        track_id = self._next_virtual_track_id
+        self._next_virtual_track_id -= 1
+        return track_id
+
+    def _find_best_track_match(self, tracks: Sequence[Track]) -> Track | None:
+        """Return the track that best matches the last locked target footprint."""
+
+        if self._last_bbox is None:
+            return None
+        best_match: Track | None = None
+        best_score = -1.0
+        for track in tracks:
+            score = self._match_score(track.bbox)
+            if score > best_score:
+                best_match = track
+                best_score = score
+        return best_match
+
+    def _find_best_detection_match(
+        self, detections: Sequence[Detection]
+    ) -> Detection | None:
+        """Return a raw detection that plausibly continues the current target."""
+
+        if self._last_bbox is None:
+            return None
+        best_match: Detection | None = None
+        best_score = -1.0
+        for detection in detections:
+            if detection.confidence < self.config.detector_confidence:
+                continue
+            score = self._match_score(detection.bbox)
+            if score > best_score:
+                best_match = detection
+                best_score = score
+        return best_match
+
+    def _match_score(self, candidate_bbox: BoundingBox) -> float:
+        """Return a positive score for plausible target-continuation candidates."""
+
+        if self._last_bbox is None:
+            return -1.0
+        overlap = self._last_bbox.intersection_over_union(candidate_bbox)
+        center_shift_x = abs(candidate_bbox.center_x - self._last_bbox.center_x) / max(
+            self._last_bbox.width, 1.0
+        )
+        center_shift_y = abs(candidate_bbox.center_y - self._last_bbox.center_y) / max(
+            self._last_bbox.height, 1.0
+        )
+        if (
+            overlap < self.config.selector_reacquire_min_iou
+            and center_shift_x > self.config.selector_reacquire_max_center_shift_ratio
+        ):
+            return -1.0
+        if (
+            overlap < self.config.selector_reacquire_min_iou
+            and center_shift_y > self.config.selector_reacquire_max_center_shift_ratio
+        ):
+            return -1.0
+        return overlap - 0.1 * (center_shift_x + center_shift_y)
 
 
 class YoloPersonDetector:

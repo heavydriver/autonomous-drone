@@ -52,6 +52,21 @@ class BoundingBox:
             return 0.0
         return self.area / float(frame_width * frame_height)
 
+    def intersection_over_union(self, other: "BoundingBox") -> float:
+        """Return the intersection-over-union with another box."""
+
+        intersection_x1 = max(self.x1, other.x1)
+        intersection_y1 = max(self.y1, other.y1)
+        intersection_x2 = min(self.x2, other.x2)
+        intersection_y2 = min(self.y2, other.y2)
+        intersection_width = max(0.0, intersection_x2 - intersection_x1)
+        intersection_height = max(0.0, intersection_y2 - intersection_y1)
+        intersection_area = intersection_width * intersection_height
+        union_area = self.area + other.area - intersection_area
+        if union_area <= 0.0:
+            return 0.0
+        return intersection_area / union_area
+
 
 @dataclass(frozen=True, slots=True)
 class Detection:

@@ -11,7 +11,7 @@ from autonomous_drone.models import BoundingBox, TargetObservation
 
 
 class FollowControllerTest(unittest.TestCase):
-    """Validate anti-oscillation and target-loss behavior."""
+    """Validate simple centering and safe target-loss behavior."""
 
     def setUp(self) -> None:
         self.camera = CameraConfig(width=1280, height=720, horizontal_fov_deg=78.0, vertical_fov_deg=49.0)
@@ -124,6 +124,28 @@ class FollowControllerTest(unittest.TestCase):
         self.assertLessEqual(abs(lost_command.velocity_forward_m_s), abs(command.velocity_forward_m_s))
         self.assertLessEqual(abs(lost_command.yaw_rate_rad_s), abs(command.yaw_rate_rad_s))
         self.assertIn("lost", lost_command.reason)
+
+    def test_small_visible_target_is_still_tracked(self) -> None:
+        """A small but visible target should not be treated as lost."""
+
+        now_s = 0.0
+        command = None
+        for _ in range(4):
+            observation = self._make_observation(
+                center_x=self.camera.width * 0.68,
+                center_y=self.camera.height * 0.5,
+                width=40.0,
+                height=60.0,
+                track_id=1,
+                timestamp_s=now_s,
+            )
+            command = self.controller.step(observation, now_s, follow_allowed=True)
+            now_s += 0.1
+
+        assert command is not None
+        self.assertTrue(command.active)
+        self.assertNotIn("lost", command.reason)
+        self.assertGreater(abs(command.yaw_rate_rad_s), 0.0)
 
 
 if __name__ == "__main__":

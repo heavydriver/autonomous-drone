@@ -1,61 +1,120 @@
 # Autonomous Drone Follower
 
-Conservative person-follow controller for ArduPilot SITL and later real-drone deployment.
+## Overview
 
-## What it does
-- Uses YOLO for person detection.
-- Uses ByteTrack for lightweight multi-frame tracking.
-- Sends conservative body-frame velocity and yaw-rate commands through `pymavlink`.
-- Gates follow autonomy on `GUIDED` mode plus an RC switch, unless you explicitly bypass the RC gate for simulation.
-- Prioritizes low-oscillation behavior through deadbands, low-pass filtering, acquisition hysteresis, and slew-rate limiting.
+This project detects a person in the camera feed, keeps that person selected across frames, and sends MAVLink follow commands to an ArduPilot-based drone in `GUIDED` mode.
 
-## Project layout
+The pipeline is:
+
+1. YOLO detects people in each frame.
+2. ByteTrack links detections across frames and helps keep a stable target ID.
+3. The target selector keeps the same person locked when tracking blips or IDs shift.
+4. The follow controller tries to keep the person near the center of the frame and maintain a configurable stand-off distance using body-frame velocity and yaw-rate commands.
+5. MAVLink gating ensures follow commands only run when the required vehicle state allows it.
+
+## Project Layout
+
 - [src/autonomous_drone/app.py](src/autonomous_drone/app.py) - CLI entrypoint
 - [src/autonomous_drone/control.py](src/autonomous_drone/control.py) - follow controller
-- [src/autonomous_drone/mavlink.py](src/autonomous_drone/mavlink.py) - ArduPilot MAVLink client and RC gate
-- [src/autonomous_drone/perception.py](src/autonomous_drone/perception.py) - YOLO + ByteTrack pipeline
-- [configs/sitl_follow.example.json](configs/sitl_follow.example.json) - simulation-oriented config example
+- [src/autonomous_drone/mavlink.py](src/autonomous_drone/mavlink.py) - ArduPilot MAVLink client and follow gate logic
+- [src/autonomous_drone/perception.py](src/autonomous_drone/perception.py) - YOLO, ByteTrack, and target selection
+- [src/autonomous_drone/config.py](src/autonomous_drone/config.py) - app configuration dataclasses
+- [configs/sitl_follow.example.json](configs/sitl_follow.example.json) - example SITL config
+- [configs/sitl_follow.local.json](configs/sitl_follow.local.json) - local SITL config
 
-## Run the tests
+## Setup
+
+Create and activate a virtual environment:
+
 ```bash
-PYTHONPATH=src ./.venv/bin/python -m unittest discover -s tests -v
+python3 -m venv .venv
+source .venv/bin/activate
 ```
 
-## Print the effective config
+Install all dependencies from [requirements.txt](requirements.txt):
+
 ```bash
-PYTHONPATH=src ./.venv/bin/python -m autonomous_drone.app \
+pip install --upgrade pip
+pip install -r requirements.txt
+```
+
+## Run Tests
+
+```bash
+python -m unittest discover -s tests -v
+```
+
+## Print The Effective Config
+
+```bash
+python -m autonomous_drone.app \
   --config configs/sitl_follow.example.json \
   --print-config
 ```
 
-## SITL + Gazebo flow
-1. Start ArduPilot SITL.
-2. Start Gazebo and expose a camera stream that OpenCV can open directly or through GStreamer.
-3. Copy `configs/sitl_follow.example.json` to your own local config and set:
-   - `tracking.model_path` to a local YOLO weights file
-   - `runtime.video_source` to your Gazebo camera source or GStreamer pipeline
-4. Run the follower:
+## Run The Follower
 
 ```bash
-PYTHONPATH=src ./.venv/bin/python -m autonomous_drone.app \
-  --config /path/to/your_sitl_follow.json
+python -m autonomous_drone.app \
+  --config configs/sitl_follow.local.json
 ```
 
-## Useful simulation flags
-- `--skip-rc-gate`: lets you test in `GUIDED` without needing an RC switch path in SITL
-- `--dry-run`: runs detection, tracking, and control without sending MAVLink commands
-- `--visualize`: shows the detection box, tracking id, and command overlay
+Useful flags:
+
+- `--skip-rc-gate` lets you test in `GUIDED` mode without needing the RC switch in SITL
+- `--dry-run` runs detection, tracking, and control without sending MAVLink commands
+- `--visualize` shows the detection box, target ID, `area_ratio`, and command overlay
 
 Example:
 
 ```bash
-PYTHONPATH=src ./.venv/bin/python -m autonomous_drone.app \
-  --config /path/to/your_sitl_follow.json \
+python -m autonomous_drone.app \
+  --config configs/sitl_follow.local.json \
   --skip-rc-gate \
   --visualize
 ```
 
+## SITL And Gazebo Commands
+
+### ArduPilot SITL
+
+```bash
+cd ~/ardupilot
+Tools/autotest/sim_vehicle.py -v ArduCopter -f gazebo-iris --model JSON --map --console
+```
+
+### Gazebo
+
+```bash
+gz sim -v4 -r iris_custom.sdf
+```
+
+### Gazebo GStreamer
+
+Enable camera streaming:
+
+```bash
+gz topic -t /world/iris_runway/model/iris_with_fixed_camera/model/fixed_camera/link/base_link/sensor/camera/image/enable_streaming -m gz.msgs.Boolean -p "data: 1"
+```
+
+View the stream:
+
+```bash
+gst-launch-1.0 -v udpsrc port=5600 caps='application/x-rtp, media=(string)video, clock-rate=(int)90000, encoding-name=(string)H264' ! rtph264depay ! avdec_h264 ! videoconvert ! autovideosink sync=false
+```
+
+## Typical Simulation Flow
+
+1. Start Gazebo.
+2. Start ArduPilot SITL.
+3. Enable the Gazebo camera stream.
+4. Confirm the video stream works with `gst-launch-1.0`.
+5. Set `tracking.model_path` to your local YOLO weights file.
+6. Set `runtime.video_source` in your config to the Gazebo GStreamer pipeline.
+7. Run the follower with `python -m autonomous_drone.app --config ...`.
+
 ## Notes
-- The app expects a local YOLO weights file and will not try to download one for you.
-- The first controller revision intentionally keeps lateral motion disabled by default to reduce twitchy behavior.
-- Fixed-altitude following is the initial mode; vertical chasing is intentionally disabled.
+
+- The app expects a local YOLO weights file and does not download one automatically.
+- Fixed-altitude following is the current mode
+- Lateral/Roll motion is still disabled

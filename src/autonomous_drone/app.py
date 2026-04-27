@@ -20,7 +20,7 @@ from autonomous_drone.perception import (
 def parse_args() -> argparse.Namespace:
     """Parse CLI arguments."""
 
-    parser = argparse.ArgumentParser(description="Conservative ArduPilot person follower")
+    parser = argparse.ArgumentParser(description="Person follower")
     parser.add_argument("--config")
     parser.add_argument("--connection")
     parser.add_argument("--baud", type=int)
@@ -64,7 +64,18 @@ def build_config(args: argparse.Namespace) -> AppConfig:
 
 
 def open_video_source(video_source: str, backend: str):
-    """Open an OpenCV video source."""
+    """Open an OpenCV video source.
+
+    Args:
+        video_source: Camera index or backend-specific source string.
+        backend: Backend selection, such as ``auto`` or ``gstreamer``.
+
+    Returns:
+        A tuple of the imported ``cv2`` module and an opened ``VideoCapture``.
+
+    Raises:
+        RuntimeError: If OpenCV is unavailable or the source cannot be opened.
+    """
 
     try:
         import cv2
@@ -82,16 +93,31 @@ def open_video_source(video_source: str, backend: str):
     else:
         capture = cv2.VideoCapture(source)
     if not capture.isOpened():
-        raise RuntimeError(f"Unable to open video source: {video_source}")
+        capture.release()
+        raise RuntimeError(
+            f"Unable to open video source with backend={backend!r}: {video_source}"
+        )
     return cv2, capture
 
 
-def draw_overlay(cv2, frame, observation, command, follow_allowed, gate_text: str) -> None:
+def draw_overlay(
+    cv2,
+    frame,
+    observation,
+    command,
+    follow_allowed,
+    gate_text: str,
+    detection_count: int,
+    track_count: int,
+    area_ratio: float | None,
+) -> None:
     """Draw lightweight debugging overlays for local testing."""
 
     height, width = frame.shape[:2]
     center = (width // 2, height // 2)
-    cv2.drawMarker(frame, center, (255, 255, 255), markerType=cv2.MARKER_CROSS, markerSize=20)
+    cv2.drawMarker(
+        frame, center, (255, 255, 255), markerType=cv2.MARKER_CROSS, markerSize=20
+    )
     if observation is not None:
         bbox = observation.bbox
         cv2.rectangle(
@@ -134,6 +160,25 @@ def draw_overlay(cv2, frame, observation, command, follow_allowed, gate_text: st
         (255, 255, 0),
         2,
     )
+    cv2.putText(
+        frame,
+        f"detections={detection_count} tracks={track_count}",
+        (10, 76),
+        cv2.FONT_HERSHEY_SIMPLEX,
+        0.55,
+        (200, 255, 200),
+        2,
+    )
+    area_ratio_text = f"{area_ratio:.3f}" if area_ratio is not None else "n/a"
+    cv2.putText(
+        frame,
+        f"area_ratio={area_ratio_text}",
+        (10, 102),
+        cv2.FONT_HERSHEY_SIMPLEX,
+        0.55,
+        (200, 220, 255),
+        2,
+    )
 
 
 def run(config: AppConfig) -> int:
@@ -142,13 +187,15 @@ def run(config: AppConfig) -> int:
     controller = FollowController(config.camera, config.tracking, config.control)
     detector = YoloPersonDetector(config.tracking, device=config.runtime.model_device)
     tracker = ByteTrackPersonTracker(config.tracking)
-    selector = PrimaryTargetSelector()
+    selector = PrimaryTargetSelector(config=config.tracking)
     mavlink = None
     if not config.runtime.dry_run:
         mavlink = MavlinkFollowerClient(config.mavlink)
         mavlink.connect()
 
-    cv2, capture = open_video_source(config.runtime.video_source, config.runtime.video_backend)
+    cv2, capture = open_video_source(
+        config.runtime.video_source, config.runtime.video_backend
+    )
     frame_interval_s = 1.0 / config.control.loop_rate_hz
     last_log_s = 0.0
 
@@ -164,7 +211,17 @@ def run(config: AppConfig) -> int:
 
         detections = detector.detect(frame)
         tracks = tracker.update(detections)
-        observation = selector.select(tracks, now_s=loop_started_s)
+        observation = selector.select(
+            tracks,
+            detections,
+            now_s=loop_started_s,
+        )
+        area_ratio = None
+        if observation is not None:
+            area_ratio = observation.bbox.area_ratio(
+                config.camera.width,
+                config.camera.height,
+            )
 
         gate_text = "dry-run"
         follow_allowed = True
@@ -176,9 +233,13 @@ def run(config: AppConfig) -> int:
                 gate_text = "rc gate bypassed"
             else:
                 follow_allowed = gate.follow_allowed
-                gate_text = f"mode_guided={gate.guided_mode} rc_high={gate.rc_switch_high}"
+                gate_text = (
+                    f"mode_guided={gate.guided_mode} rc_high={gate.rc_switch_high}"
+                )
 
-        command = controller.step(observation, loop_started_s, follow_allowed=follow_allowed)
+        command = controller.step(
+            observation, loop_started_s, follow_allowed=follow_allowed
+        )
 
         if mavlink is not None:
             if follow_allowed:
@@ -190,6 +251,7 @@ def run(config: AppConfig) -> int:
             last_log_s = loop_started_s
             print(
                 f"[follow] active={command.active} reason={command.reason} "
+                f"detections={len(detections)} tracks={len(tracks)} "
                 f"target={'yes' if observation else 'no'} "
                 f"vx={command.velocity_forward_m_s:+.2f} "
                 f"vy={command.velocity_right_m_s:+.2f} "
@@ -198,7 +260,17 @@ def run(config: AppConfig) -> int:
             )
 
         if config.runtime.visualize:
-            draw_overlay(cv2, frame, observation, command, follow_allowed, gate_text)
+            draw_overlay(
+                cv2,
+                frame,
+                observation,
+                command,
+                follow_allowed,
+                gate_text,
+                detection_count=len(detections),
+                track_count=len(tracks),
+                area_ratio=area_ratio,
+            )
             cv2.imshow("drone-follower", frame)
             key = cv2.waitKey(1) & 0xFF
             if key in (27, ord("q")):

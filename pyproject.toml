@@ -8,8 +8,6 @@ version = "0.1.0"
 description = "SITL-first person-follow control stack for ArduPilot using pymavlink and ByteTrack."
 requires-python = ">=3.10"
 dependencies = [
-    "numpy>=1.24",
-    "opencv-python>=4.9",
     "pymavlink>=2.4.49",
     "supervision>=0.23.0",
     "ultralytics>=8.3.0",
@@ -24,12 +22,12 @@ package-dir = {"" = "src"}
 [tool.setuptools.packages.find]
 where = ["src"]
 
-[tool.poetry.dependencies]
-python = "^3.10"
-torch = {version = "2.10.0+xpu", source = "intel-xpu"}
-torchvision = {version = "0.25.0+xpu", source = "intel-xpu"}
+# [tool.poetry.dependencies]
+# python = "^3.10"
+# torch = {version = "2.10.0+xpu", source = "intel-xpu"}
+# torchvision = {version = "0.25.0+xpu", source = "intel-xpu"}
 
-[[tool.poetry.source]]
-name = "intel-xpu"
-url = "https://download.pytorch.org/whl/xpu"
-priority = "explicit"
+# [[tool.poetry.source]]
+# name = "intel-xpu"
+# url = "https://download.pytorch.org/whl/xpu"
+# priority = "explicit"

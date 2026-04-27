@@ -1,4 +1,4 @@
-"""Conservative person-follow controller."""
+"""Simple person-follow controller centered on image alignment and standoff."""
 
 from __future__ import annotations
 
@@ -43,7 +43,7 @@ def _rate_limit(current: float, target: float, max_delta: float) -> float:
 
 
 class FollowController:
-    """Stateful, conservative follow controller with anti-oscillation logic."""
+    """Stateful follow controller that centers the target and holds distance."""
 
     def __init__(
         self,
@@ -90,7 +90,7 @@ class FollowController:
             follow_allowed: Whether external gating allows autonomous follow.
 
         Returns:
-            A conservative body-frame velocity and yaw-rate command.
+            A body-frame velocity and yaw-rate command.
         """
 
         dt = self._compute_dt(now_s)
@@ -102,10 +102,6 @@ class FollowController:
             return self._handle_missing_target(now_s, dt)
 
         area_ratio = observation.bbox.area_ratio(self._camera.width, self._camera.height)
-        if observation.confidence < self._tracking.detector_confidence:
-            return self._handle_missing_target(now_s, dt, "target confidence below threshold")
-        if area_ratio < self._tracking.min_box_area_ratio:
-            return self._handle_missing_target(now_s, dt, "target box too small")
 
         if observation.track_id != self._locked_track_id:
             self._locked_track_id = observation.track_id
@@ -133,7 +129,6 @@ class FollowController:
 
         command = self._compute_tracking_command(
             horizontal_rad=self._filtered_horizontal_rad,
-            vertical_body_rad=angles.vertical_body_rad,
             area_ratio=self._filtered_area_ratio,
         )
         return self._apply_rate_limits(command, dt)
@@ -193,10 +188,9 @@ class FollowController:
     def _compute_tracking_command(
         self,
         horizontal_rad: float,
-        vertical_body_rad: float,
         area_ratio: float,
     ) -> FollowCommand:
-        """Compute an unconstrained follow command from filtered observations."""
+        """Compute a follow command from filtered image alignment and size."""
 
         yaw_deadband_rad = math.radians(self._control.yaw_deadband_deg)
         if abs(horizontal_rad) <= yaw_deadband_rad:
@@ -213,14 +207,15 @@ class FollowController:
         if area_ratio >= self._tracking.emergency_stop_area_ratio:
             forward_speed_m_s = min(forward_speed_m_s, 0.0)
 
-        if abs(math.degrees(vertical_body_rad)) > self._control.vertical_slowdown_angle_deg:
-            forward_speed_m_s *= 0.5
-
         lateral_speed_m_s = 0.0
         if self._control.enable_lateral_motion:
             alignment_window_rad = math.radians(self._control.horizontal_alignment_window_deg)
             if abs(horizontal_rad) <= alignment_window_rad:
                 lateral_speed_m_s = self._control.lateral_gain * horizontal_rad
+
+        reason = "tracking target"
+        if area_ratio < self._tracking.min_box_area_ratio:
+            reason = "tracking small target"
 
         command = FollowCommand(
             velocity_forward_m_s=_clamp(
@@ -240,7 +235,7 @@ class FollowController:
                 math.radians(self._control.max_yaw_rate_deg_s),
             ),
             active=True,
-            reason="tracking target",
+            reason=reason,
         )
         return command
 
