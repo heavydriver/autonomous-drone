@@ -2,9 +2,11 @@
 
 from __future__ import annotations
 
+import tempfile
 import unittest
+from pathlib import Path
 
-from autonomous_drone.app import build_config, parse_args
+from autonomous_drone.app import AnnotatedClipRecorder, build_config, parse_args
 
 
 class AppCliConfigTest(unittest.TestCase):
@@ -63,6 +65,111 @@ class AppCliConfigTest(unittest.TestCase):
         self.assertEqual(config.mavlink.transport, "udp")
         self.assertEqual(config.mavlink.udp_host, "192.168.1.20")
         self.assertEqual(config.mavlink.udp_port, 14555)
+
+    def test_recording_flags_enable_annotated_clip_output(self) -> None:
+        """Recording flags should opt in to annotated video clip capture."""
+
+        args = parse_args(
+            [
+                "--record-annotated-video",
+                "--recording-output-dir",
+                "captures",
+                "--recording-clip-duration-s",
+                "45",
+            ]
+        )
+
+        config = build_config(args)
+
+        self.assertTrue(config.runtime.record_annotated_video)
+        self.assertEqual(config.runtime.recording_output_dir, "captures")
+        self.assertEqual(config.runtime.recording_clip_duration_s, 45.0)
+
+
+class _FakeFrame:
+    """Minimal frame object exposing the shape OpenCV code expects."""
+
+    shape = (720, 1280, 3)
+
+
+class _FakeWriter:
+    """Simple in-memory stand-in for OpenCV's ``VideoWriter``."""
+
+    def __init__(self, path: str, fps: float, frame_size: tuple[int, int]) -> None:
+        self.path = path
+        self.fps = fps
+        self.frame_size = frame_size
+        self.frames: list[object] = []
+        self.released = False
+
+    def isOpened(self) -> bool:
+        """Report that the writer initialized successfully."""
+
+        return True
+
+    def write(self, frame: object) -> None:
+        """Record a frame write for assertions."""
+
+        self.frames.append(frame)
+
+    def release(self) -> None:
+        """Mark the writer as released."""
+
+        self.released = True
+
+
+class _FakeCv2:
+    """Small subset of the OpenCV API needed by ``AnnotatedClipRecorder``."""
+
+    def __init__(self) -> None:
+        self.writers: list[_FakeWriter] = []
+
+    def VideoWriter_fourcc(self, *_chars: str) -> int:
+        """Return a placeholder codec identifier."""
+
+        return 0
+
+    def VideoWriter(
+        self,
+        path: str,
+        _fourcc: int,
+        fps: float,
+        frame_size: tuple[int, int],
+    ) -> _FakeWriter:
+        """Create a fake writer and remember it for later inspection."""
+
+        writer = _FakeWriter(path=path, fps=fps, frame_size=frame_size)
+        self.writers.append(writer)
+        return writer
+
+
+class AnnotatedClipRecorderTest(unittest.TestCase):
+    """Validate clip rotation for annotated video recording."""
+
+    def test_recorder_rotates_clips_after_thirty_seconds(self) -> None:
+        """Frames at or beyond the duration limit should start a new clip."""
+
+        fake_cv2 = _FakeCv2()
+        frame = _FakeFrame()
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            recorder = AnnotatedClipRecorder(
+                cv2=fake_cv2,
+                output_dir=Path(tmp_dir),
+                clip_duration_s=30.0,
+                fps=10.0,
+            )
+
+            recorder.write_frame(frame, now_s=0.0)
+            recorder.write_frame(frame, now_s=29.9)
+            recorder.write_frame(frame, now_s=30.0)
+            recorder.close()
+
+        self.assertEqual(len(fake_cv2.writers), 2)
+        self.assertEqual(len(fake_cv2.writers[0].frames), 2)
+        self.assertEqual(len(fake_cv2.writers[1].frames), 1)
+        self.assertTrue(fake_cv2.writers[0].released)
+        self.assertTrue(fake_cv2.writers[1].released)
+        self.assertEqual(fake_cv2.writers[0].frame_size, (1280, 720))
 
 
 if __name__ == "__main__":

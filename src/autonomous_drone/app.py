@@ -6,6 +6,8 @@ import argparse
 import json
 import sys
 import time
+from datetime import datetime
+from pathlib import Path
 
 from autonomous_drone.config import AppConfig, config_to_dict, load_config_file
 from autonomous_drone.control import FollowController
@@ -36,6 +38,9 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--dry-run", action="store_true")
     parser.add_argument("--skip-rc-gate", action="store_true")
     parser.add_argument("--visualize", action="store_true")
+    parser.add_argument("--record-annotated-video", action="store_true")
+    parser.add_argument("--recording-output-dir")
+    parser.add_argument("--recording-clip-duration-s", type=float)
     parser.add_argument("--print-config", action="store_true")
     return parser.parse_args(argv)
 
@@ -83,6 +88,12 @@ def build_config(args: argparse.Namespace) -> AppConfig:
         config.runtime.skip_rc_gate = True
     if args.visualize:
         config.runtime.visualize = True
+    if args.record_annotated_video:
+        config.runtime.record_annotated_video = True
+    if args.recording_output_dir is not None:
+        config.runtime.recording_output_dir = args.recording_output_dir
+    if args.recording_clip_duration_s is not None:
+        config.runtime.recording_clip_duration_s = args.recording_clip_duration_s
     return config
 
 
@@ -204,6 +215,93 @@ def draw_overlay(
     )
 
 
+class AnnotatedClipRecorder:
+    """Write annotated frames into fixed-duration video clips.
+
+    Args:
+        cv2: Imported OpenCV module used to create video writers.
+        output_dir: Directory where clip files are written.
+        clip_duration_s: Maximum duration of each clip in seconds.
+        fps: Output frame rate for the encoded video.
+
+    Raises:
+        ValueError: If ``clip_duration_s`` or ``fps`` are not positive.
+    """
+
+    def __init__(
+        self,
+        cv2,
+        output_dir: Path,
+        clip_duration_s: float,
+        fps: float,
+    ) -> None:
+        if clip_duration_s <= 0.0:
+            raise ValueError("recording clip duration must be greater than zero")
+        if fps <= 0.0:
+            raise ValueError("recording fps must be greater than zero")
+
+        self._cv2 = cv2
+        self._output_dir = output_dir
+        self._clip_duration_s = clip_duration_s
+        self._fps = fps
+        self._writer = None
+        self._clip_started_s: float | None = None
+        self._clip_index = 0
+        self._output_dir.mkdir(parents=True, exist_ok=True)
+
+    def write_frame(self, frame, now_s: float) -> None:
+        """Append a frame to the current clip, rotating clips as needed.
+
+        Args:
+            frame: Annotated OpenCV image to encode.
+            now_s: Monotonic timestamp for the current frame.
+        """
+
+        if self._needs_new_clip(now_s):
+            self._start_new_clip(frame, now_s)
+        self._writer.write(frame)
+
+    def close(self) -> None:
+        """Release the current writer, if one is active."""
+
+        if self._writer is not None:
+            self._writer.release()
+            self._writer = None
+            self._clip_started_s = None
+
+    def _needs_new_clip(self, now_s: float) -> bool:
+        """Return ``True`` when a new output clip should be created."""
+
+        if self._writer is None or self._clip_started_s is None:
+            return True
+        return (now_s - self._clip_started_s) >= self._clip_duration_s
+
+    def _start_new_clip(self, frame, now_s: float) -> None:
+        """Open a new writer sized to the current frame."""
+
+        self.close()
+        height, width = frame.shape[:2]
+        timestamp = datetime.now().strftime("%Y%m%d-%H%M%S")
+        output_path = self._output_dir / (
+            f"annotated-{timestamp}-{self._clip_index:04d}.mp4"
+        )
+        fourcc = self._cv2.VideoWriter_fourcc(*"mp4v")
+        writer = self._cv2.VideoWriter(
+            str(output_path),
+            fourcc,
+            self._fps,
+            (width, height),
+        )
+        if not writer.isOpened():
+            writer.release()
+            raise RuntimeError(f"Unable to open annotated video writer: {output_path}")
+
+        self._writer = writer
+        self._clip_started_s = now_s
+        self._clip_index += 1
+        print(f"[recording] writing annotated clip {output_path}")
+
+
 def run(config: AppConfig) -> int:
     """Run the main follow loop."""
 
@@ -225,92 +323,109 @@ def run(config: AppConfig) -> int:
     )
     frame_interval_s = 1.0 / config.control.loop_rate_hz
     last_log_s = 0.0
-
-    while True:
-        loop_started_s = time.monotonic()
-        ok, frame = capture.read()
-        if not ok:
-            print("Video source ended or failed.")
-            break
-
-        config.camera.width = int(frame.shape[1])
-        config.camera.height = int(frame.shape[0])
-
-        detections = detector.detect(frame)
-        tracks = tracker.update(detections)
-        observation = selector.select(
-            tracks,
-            detections,
-            now_s=loop_started_s,
-        )
-        area_ratio = None
-        if observation is not None:
-            area_ratio = observation.bbox.area_ratio(
-                config.camera.width,
-                config.camera.height,
-            )
-
-        gate_text = "dry-run"
-        follow_allowed = True
-        if mavlink is not None:
-            mavlink.poll_state()
-            gate = mavlink.compute_follow_gate()
-            if config.runtime.skip_rc_gate:
-                follow_allowed = gate.guided_mode
-                gate_text = "rc gate bypassed"
-            else:
-                follow_allowed = gate.follow_allowed
-                gate_text = (
-                    f"mode_guided={gate.guided_mode} rc_high={gate.rc_switch_high}"
-                )
-
-        command = controller.step(
-            observation, loop_started_s, follow_allowed=follow_allowed
+    recorder = None
+    if config.runtime.record_annotated_video:
+        recorder = AnnotatedClipRecorder(
+            cv2=cv2,
+            output_dir=Path(config.runtime.recording_output_dir),
+            clip_duration_s=config.runtime.recording_clip_duration_s,
+            fps=config.control.loop_rate_hz,
         )
 
-        if mavlink is not None:
-            if follow_allowed:
-                mavlink.send_follow_command(command)
-            else:
-                mavlink.send_zero_once(reason=command.reason)
-
-        if loop_started_s - last_log_s >= 1.0:
-            last_log_s = loop_started_s
-            print(
-                f"[follow] active={command.active} reason={command.reason} "
-                f"detections={len(detections)} tracks={len(tracks)} "
-                f"target={'yes' if observation else 'no'} "
-                f"vx={command.velocity_forward_m_s:+.2f} "
-                f"vy={command.velocity_right_m_s:+.2f} "
-                f"yaw={command.yaw_rate_rad_s:+.2f} "
-                f"gate={gate_text}"
-            )
-
-        if config.runtime.visualize:
-            draw_overlay(
-                cv2,
-                frame,
-                observation,
-                command,
-                follow_allowed,
-                gate_text,
-                detection_count=len(detections),
-                track_count=len(tracks),
-                area_ratio=area_ratio,
-            )
-            cv2.imshow("drone-follower", frame)
-            key = cv2.waitKey(1) & 0xFF
-            if key in (27, ord("q")):
+    try:
+        while True:
+            loop_started_s = time.monotonic()
+            ok, frame = capture.read()
+            if not ok:
+                print("Video source ended or failed.")
                 break
 
-        elapsed_s = time.monotonic() - loop_started_s
-        remaining_s = frame_interval_s - elapsed_s
-        if remaining_s > 0.0:
-            time.sleep(remaining_s)
+            config.camera.width = int(frame.shape[1])
+            config.camera.height = int(frame.shape[0])
 
-    capture.release()
-    if config.runtime.visualize:
-        cv2.destroyAllWindows()
+            detections = detector.detect(frame)
+            tracks = tracker.update(detections)
+            observation = selector.select(
+                tracks,
+                detections,
+                now_s=loop_started_s,
+            )
+            area_ratio = None
+            if observation is not None:
+                area_ratio = observation.bbox.area_ratio(
+                    config.camera.width,
+                    config.camera.height,
+                )
+
+            gate_text = "dry-run"
+            follow_allowed = True
+            if mavlink is not None:
+                mavlink.poll_state()
+                gate = mavlink.compute_follow_gate()
+                if config.runtime.skip_rc_gate:
+                    follow_allowed = gate.guided_mode
+                    gate_text = "rc gate bypassed"
+                else:
+                    follow_allowed = gate.follow_allowed
+                    gate_text = (
+                        f"mode_guided={gate.guided_mode} rc_high={gate.rc_switch_high}"
+                    )
+
+            command = controller.step(
+                observation, loop_started_s, follow_allowed=follow_allowed
+            )
+
+            if mavlink is not None:
+                if follow_allowed:
+                    mavlink.send_follow_command(command)
+                else:
+                    mavlink.send_zero_once(reason=command.reason)
+
+            if loop_started_s - last_log_s >= 1.0:
+                last_log_s = loop_started_s
+                print(
+                    f"[follow] active={command.active} reason={command.reason} "
+                    f"detections={len(detections)} tracks={len(tracks)} "
+                    f"target={'yes' if observation else 'no'} "
+                    f"vx={command.velocity_forward_m_s:+.2f} "
+                    f"vy={command.velocity_right_m_s:+.2f} "
+                    f"yaw={command.yaw_rate_rad_s:+.2f} "
+                    f"gate={gate_text}"
+                )
+
+            if config.runtime.visualize or recorder is not None:
+                draw_overlay(
+                    cv2,
+                    frame,
+                    observation,
+                    command,
+                    follow_allowed,
+                    gate_text,
+                    detection_count=len(detections),
+                    track_count=len(tracks),
+                    area_ratio=area_ratio,
+                )
+
+            if recorder is not None:
+                recorder.write_frame(frame, now_s=loop_started_s)
+
+            if config.runtime.visualize:
+                cv2.imshow("drone-follower", frame)
+                key = cv2.waitKey(1) & 0xFF
+                if key in (27, ord("q")):
+                    break
+
+            elapsed_s = time.monotonic() - loop_started_s
+            remaining_s = frame_interval_s - elapsed_s
+            if remaining_s > 0.0:
+                time.sleep(remaining_s)
+    finally:
+        capture.release()
+        if recorder is not None:
+            recorder.close()
+        if config.runtime.visualize:
+            cv2.destroyAllWindows()
+
     return 0
 
 

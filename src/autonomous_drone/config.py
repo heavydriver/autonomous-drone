@@ -140,6 +140,9 @@ class RuntimeConfig:
     dry_run: bool = False
     skip_rc_gate: bool = False
     visualize: bool = False
+    record_annotated_video: bool = False
+    recording_output_dir: str = "recordings"
+    recording_clip_duration_s: float = 30.0
     video_source: str = "0"
     video_backend: str = "auto"
     model_device: str = "cpu"
