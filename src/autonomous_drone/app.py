@@ -17,12 +17,16 @@ from autonomous_drone.perception import (
 )
 
 
-def parse_args() -> argparse.Namespace:
+def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     """Parse CLI arguments."""
 
     parser = argparse.ArgumentParser(description="Person follower")
     parser.add_argument("--config")
     parser.add_argument("--connection")
+    parser.add_argument("--transport", choices=("udp", "serial"))
+    parser.add_argument("--udp-host")
+    parser.add_argument("--udp-port", type=int)
+    parser.add_argument("--serial-device")
     parser.add_argument("--baud", type=int)
     parser.add_argument("--video-source")
     parser.add_argument("--video-backend", choices=("auto", "gstreamer"))
@@ -33,15 +37,34 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--skip-rc-gate", action="store_true")
     parser.add_argument("--visualize", action="store_true")
     parser.add_argument("--print-config", action="store_true")
-    return parser.parse_args()
+    return parser.parse_args(argv)
 
 
 def build_config(args: argparse.Namespace) -> AppConfig:
     """Build an application config from CLI arguments."""
 
     config = load_config_file(args.config) if args.config else AppConfig()
+    explicit_transport = args.transport is not None
     if args.connection is not None:
         config.mavlink.connection_string = args.connection
+    if args.transport is not None:
+        config.mavlink.transport = args.transport
+        config.mavlink.connection_string = None
+    if args.udp_host is not None:
+        if not explicit_transport:
+            config.mavlink.transport = "udp"
+        config.mavlink.udp_host = args.udp_host
+        config.mavlink.connection_string = None
+    if args.udp_port is not None:
+        if not explicit_transport:
+            config.mavlink.transport = "udp"
+        config.mavlink.udp_port = args.udp_port
+        config.mavlink.connection_string = None
+    if args.serial_device is not None:
+        if not explicit_transport:
+            config.mavlink.transport = "serial"
+        config.mavlink.serial_device = args.serial_device
+        config.mavlink.connection_string = None
     if args.baud is not None:
         config.mavlink.baud_rate = args.baud
     if args.model is not None:
@@ -190,6 +213,10 @@ def run(config: AppConfig) -> int:
     selector = PrimaryTargetSelector(config=config.tracking)
     mavlink = None
     if not config.runtime.dry_run:
+        print(
+            "[mavlink] connecting to "
+            f"{config.mavlink.describe_endpoint()}"
+        )
         mavlink = MavlinkFollowerClient(config.mavlink)
         mavlink.connect()
 

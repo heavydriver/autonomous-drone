@@ -3,7 +3,9 @@
     "mount_pitch_deg": 10.0
   },
   "mavlink": {
-    "connection_string": "udp:127.0.0.1:14550",
+    "transport": "udp",
+    "udp_host": "127.0.0.1",
+    "udp_port": 14550,
     "baud_rate": 57600,
     "follow_enable_channel": 7,
     "follow_enable_high_pwm": 1800,

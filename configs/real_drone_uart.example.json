@@ -3,10 +3,9 @@
     "mount_pitch_deg": 10.0
   },
   "mavlink": {
-    "transport": "udp",
-    "udp_host": "127.0.0.1",
-    "udp_port": 14550,
-    "baud_rate": 57600,
+    "transport": "serial",
+    "serial_device": "/dev/ttyYOUR_UART_DEVICE",
+    "baud_rate": 921600,
     "follow_enable_channel": 7,
     "follow_enable_high_pwm": 1800,
     "guided_mode_name": "GUIDED",
@@ -51,10 +50,10 @@
   },
   "runtime": {
     "dry_run": false,
-    "skip_rc_gate": true,
+    "skip_rc_gate": false,
     "visualize": true,
-    "video_source": "PASTE_YOUR_GSTREAMER_PIPELINE_OR_DEVICE_HERE",
-    "video_backend": "gstreamer",
+    "video_source": "PASTE_YOUR_CAMERA_DEVICE_OR_GSTREAMER_PIPELINE_HERE",
+    "video_backend": "auto",
     "model_device": "cpu"
   }
 }

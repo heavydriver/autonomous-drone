@@ -46,7 +46,7 @@ class MavlinkFollowerClient:
         self._config = config
         self._mavutil = mavutil
         self._master = mavutil.mavlink_connection(
-            config.connection_string,
+            config.resolved_connection_string(),
             baud=config.baud_rate,
             autoreconnect=True,
         )

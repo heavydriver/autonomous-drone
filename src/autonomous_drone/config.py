@@ -23,12 +23,62 @@ class CameraConfig:
 class MavlinkConfig:
     """MAVLink connection and RC gating configuration."""
 
-    connection_string: str = "udp:127.0.0.1:14550"
+    connection_string: str | None = None
+    transport: str = "udp"
+    udp_host: str = "127.0.0.1"
+    udp_port: int = 14550
+    serial_device: str = "/dev/serial0"
     baud_rate: int = 57600
     stream_rate_hz: int = 10
     guided_mode_name: str = "GUIDED"
     follow_enable_channel: int = 7
     follow_enable_high_pwm: int = 1800
+
+    def resolved_connection_string(self) -> str:
+        """Return the pymavlink connection string for the configured transport.
+
+        Returns:
+            A connection string accepted by ``pymavlink.mavutil.mavlink_connection``.
+
+        Raises:
+            ValueError: If the configured transport or endpoint is invalid.
+        """
+
+        if self.connection_string:
+            return self.connection_string
+
+        transport = self.transport.strip().lower()
+        if transport == "udp":
+            if not self.udp_host:
+                raise ValueError("mavlink.udp_host must be set when transport='udp'")
+            if self.udp_port <= 0:
+                raise ValueError("mavlink.udp_port must be greater than zero")
+            return f"udp:{self.udp_host}:{self.udp_port}"
+
+        if transport == "serial":
+            if not self.serial_device:
+                raise ValueError(
+                    "mavlink.serial_device must be set when transport='serial'"
+                )
+            return self.serial_device
+
+        raise ValueError(
+            f"Unsupported MAVLink transport '{self.transport}'. "
+            "Expected 'udp' or 'serial'."
+        )
+
+    def describe_endpoint(self) -> str:
+        """Return a concise human-readable endpoint description."""
+
+        if self.connection_string:
+            return f"raw:{self.connection_string}"
+
+        transport = self.transport.strip().lower()
+        if transport == "udp":
+            return f"udp:{self.udp_host}:{self.udp_port}"
+        if transport == "serial":
+            return f"serial:{self.serial_device}@{self.baud_rate}"
+        return transport
 
 
 @dataclass(slots=True)

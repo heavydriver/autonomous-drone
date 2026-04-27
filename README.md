@@ -21,6 +21,7 @@ The pipeline is:
 - [src/autonomous_drone/config.py](src/autonomous_drone/config.py) - app configuration dataclasses
 - [configs/sitl_follow.example.json](configs/sitl_follow.example.json) - example SITL config
 - [configs/sitl_follow.local.json](configs/sitl_follow.local.json) - local SITL config
+- [configs/real_drone_uart.example.json](configs/real_drone_uart.example.json) - example real-drone UART config
 
 ## Setup
 
@@ -47,20 +48,24 @@ python -m unittest discover -s tests -v
 ## Print The Effective Config
 
 ```bash
+cd src
 python -m autonomous_drone.app \
-  --config configs/sitl_follow.example.json \
+  --config ../configs/sitl_follow.example.json \
   --print-config
 ```
 
 ## Run The Follower
 
 ```bash
+cd src
 python -m autonomous_drone.app \
-  --config configs/sitl_follow.local.json
+  --config ../configs/sitl_follow.local.json
 ```
 
 Useful flags:
 
+- `--transport udp --udp-host 127.0.0.1 --udp-port 14550` selects a structured SITL endpoint
+- `--transport serial --serial-device /dev/ttyUSB0 --baud 921600` selects a UART-connected flight controller
 - `--skip-rc-gate` lets you test in `GUIDED` mode without needing the RC switch in SITL
 - `--dry-run` runs detection, tracking, and control without sending MAVLink commands
 - `--visualize` shows the detection box, target ID, `area_ratio`, and command overlay
@@ -68,8 +73,9 @@ Useful flags:
 Example:
 
 ```bash
+cd src
 python -m autonomous_drone.app \
-  --config configs/sitl_follow.local.json \
+  --config ../configs/sitl_follow.local.json \
   --skip-rc-gate \
   --visualize
 ```
@@ -112,6 +118,32 @@ gst-launch-1.0 -v udpsrc port=5600 caps='application/x-rtp, media=(string)video,
 5. Set `tracking.model_path` to your local YOLO weights file.
 6. Set `runtime.video_source` in your config to the Gazebo GStreamer pipeline.
 7. Run the follower with `python -m autonomous_drone.app --config ...`.
+
+## Real Drone UART Notes
+
+For a direct MAVLink UART link to ArduPilot, set the flight controller serial port to MAVLink2 and match the baud rate used by the companion computer. The ArduPilot companion-computer guide shows `SERIAL2_PROTOCOL = 2` and `SERIAL2_BAUD = 921` for a 921600 baud link:
+
+<https://ardupilot.org/dev/docs/raspberry-pi-via-mavlink.html>
+
+On the Radxa Dragon Q6A 40-pin header, the published pin map shows:
+
+- physical pin `8` as `UART5_TX`
+- physical pin `10` as `UART5_RX`
+- physical pin `6` as `GND`
+
+Reference:
+
+<https://docs.radxa.com/en/dragon/q6a/hardware-use/pin-gpio>
+
+Example run command:
+
+```bash
+cd src
+python -m autonomous_drone.app \
+  --config ../configs/real_drone_uart.example.json \
+  --serial-device /dev/ttyYOUR_UART_DEVICE \
+  --baud 921600
+```
 
 ## Notes
 
