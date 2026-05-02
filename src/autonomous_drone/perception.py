@@ -203,7 +203,7 @@ class YoloPersonDetector:
             source=frame,
             conf=self._config.detector_confidence,
             verbose=False,
-            device=self._device,
+            device=self._device
         )
         detections: List[Detection] = []
         if not results:
