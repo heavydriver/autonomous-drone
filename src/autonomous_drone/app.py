@@ -10,12 +10,15 @@ from datetime import datetime
 from pathlib import Path
 
 from autonomous_drone.config import AppConfig, config_to_dict, load_config_file
-from autonomous_drone.control import FollowController
+from autonomous_drone.control import FollowController, OrbitController
 from autonomous_drone.mavlink import MavlinkFollowerClient
+from autonomous_drone.metrics import CsvRunLogger, GateSnapshot, TimingSnapshot
 from autonomous_drone.perception import (
     ByteTrackPersonTracker,
     PrimaryTargetSelector,
+    PoseGestureResult,
     YoloPersonDetector,
+    YoloPoseEstimator,
 )
 
 
@@ -35,9 +38,14 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--model")
     parser.add_argument("--device")
     parser.add_argument("--mount-pitch-deg", type=float)
+    parser.add_argument("--enable-hand-raise-circle", action="store_true")
+    parser.add_argument("--pose-model")
+    parser.add_argument("--pose-interval-s", type=float)
     parser.add_argument("--dry-run", action="store_true")
     parser.add_argument("--skip-rc-gate", action="store_true")
     parser.add_argument("--visualize", action="store_true")
+    parser.add_argument("--log-data", action="store_true")
+    parser.add_argument("--log-output-dir")
     parser.add_argument("--record-annotated-video", action="store_true")
     parser.add_argument("--recording-output-dir")
     parser.add_argument("--recording-clip-duration-s", type=float)
@@ -82,12 +90,22 @@ def build_config(args: argparse.Namespace) -> AppConfig:
         config.runtime.model_device = args.device
     if args.mount_pitch_deg is not None:
         config.camera.mount_pitch_deg = args.mount_pitch_deg
+    if args.enable_hand_raise_circle:
+        config.pose.hand_raise_circle_enabled = True
+    if args.pose_model is not None:
+        config.pose.model_path = args.pose_model
+    if args.pose_interval_s is not None:
+        config.pose.inference_interval_s = args.pose_interval_s
     if args.dry_run:
         config.runtime.dry_run = True
     if args.skip_rc_gate:
         config.runtime.skip_rc_gate = True
     if args.visualize:
         config.runtime.visualize = True
+    if args.log_data:
+        config.runtime.log_data = True
+    if args.log_output_dir is not None:
+        config.runtime.log_output_dir = args.log_output_dir
     if args.record_annotated_video:
         config.runtime.record_annotated_video = True
     if args.recording_output_dir is not None:
@@ -144,6 +162,8 @@ def draw_overlay(
     detection_count: int,
     track_count: int,
     area_ratio: float | None,
+    pose_status_text: str,
+    orbit_status_text: str,
 ) -> None:
     """Draw lightweight debugging overlays for local testing."""
 
@@ -211,6 +231,24 @@ def draw_overlay(
         cv2.FONT_HERSHEY_SIMPLEX,
         0.55,
         (200, 220, 255),
+        2,
+    )
+    cv2.putText(
+        frame,
+        pose_status_text,
+        (10, 128),
+        cv2.FONT_HERSHEY_SIMPLEX,
+        0.55,
+        (180, 220, 255),
+        2,
+    )
+    cv2.putText(
+        frame,
+        orbit_status_text,
+        (10, 154),
+        cv2.FONT_HERSHEY_SIMPLEX,
+        0.55,
+        (150, 255, 150),
         2,
     )
 
@@ -306,9 +344,26 @@ def run(config: AppConfig) -> int:
     """Run the main follow loop."""
 
     controller = FollowController(config.camera, config.tracking, config.control)
+    orbit_controller = OrbitController(
+        config.camera,
+        config.tracking,
+        config.control,
+        config.safety,
+        config.orbit,
+    )
     detector = YoloPersonDetector(config.tracking, device=config.runtime.model_device)
     tracker = ByteTrackPersonTracker(config.tracking)
     selector = PrimaryTargetSelector(config=config.tracking)
+    pose_estimator = None
+    if config.pose.hand_raise_circle_enabled:
+        print(
+            "[pose] enabling right-hand orbit trigger with "
+            f"{config.pose.model_path}"
+        )
+        pose_estimator = YoloPoseEstimator(
+            config.pose, device=config.runtime.model_device
+        )
+
     mavlink = None
     if not config.runtime.dry_run:
         print(
@@ -323,7 +378,25 @@ def run(config: AppConfig) -> int:
     )
     frame_interval_s = 1.0 / config.control.loop_rate_hz
     last_log_s = 0.0
+    last_frame_started_s: float | None = None
+    last_pose_sample_s = float("-inf")
+    last_orbit_trigger_s = float("-inf")
+    hand_raise_latched = False
+    last_pose_result = PoseGestureResult(
+        sampled=False,
+        right_hand_up=None,
+        reason="pose feature disabled"
+        if not config.pose.hand_raise_circle_enabled
+        else "pose idle",
+    )
     recorder = None
+    logger = None
+    if config.runtime.log_data:
+        logger = CsvRunLogger(
+            output_dir=Path(config.runtime.log_output_dir),
+            desired_area_ratio=config.tracking.desired_box_area_ratio,
+        )
+        print(f"[logging] writing CSV logs to {logger.session_dir}")
     if config.runtime.record_annotated_video:
         recorder = AnnotatedClipRecorder(
             cv2=cv2,
@@ -335,7 +408,9 @@ def run(config: AppConfig) -> int:
     try:
         while True:
             loop_started_s = time.monotonic()
+            frame_index = logger.next_frame_index() if logger is not None else 0
             ok, frame = capture.read()
+            frame_grab_latency_s = time.monotonic() - loop_started_s
             if not ok:
                 print("Video source ended or failed.")
                 break
@@ -343,43 +418,194 @@ def run(config: AppConfig) -> int:
             config.camera.width = int(frame.shape[1])
             config.camera.height = int(frame.shape[0])
 
+            detection_started_s = time.monotonic()
             detections = detector.detect(frame)
+            detection_latency_s = time.monotonic() - detection_started_s
+            tracking_started_s = time.monotonic()
             tracks = tracker.update(detections)
+            tracking_latency_s = time.monotonic() - tracking_started_s
+            selection_started_s = time.monotonic()
             observation = selector.select(
                 tracks,
                 detections,
                 now_s=loop_started_s,
             )
+            selection_latency_s = time.monotonic() - selection_started_s
             area_ratio = None
+            target_angles = None
             if observation is not None:
                 area_ratio = observation.bbox.area_ratio(
                     config.camera.width,
                     config.camera.height,
                 )
+                target_angles = controller.compute_target_angles(observation)
+            pose_result = PoseGestureResult(
+                sampled=False,
+                right_hand_up=last_pose_result.right_hand_up,
+                reason=last_pose_result.reason,
+            )
+            orbit_status = orbit_controller.status
 
-            gate_text = "dry-run"
-            follow_allowed = True
+            gate_snapshot = GateSnapshot(
+                follow_allowed=True,
+                guided_mode=True,
+                rc_switch_high=True,
+                rc_channel_pwm=None,
+                gate_text="dry-run",
+            )
+            vehicle_state = None
             if mavlink is not None:
-                mavlink.poll_state()
+                vehicle_state = mavlink.poll_state()
                 gate = mavlink.compute_follow_gate()
                 if config.runtime.skip_rc_gate:
-                    follow_allowed = gate.guided_mode
-                    gate_text = "rc gate bypassed"
+                    gate_snapshot = GateSnapshot(
+                        follow_allowed=gate.guided_mode,
+                        guided_mode=gate.guided_mode,
+                        rc_switch_high=gate.rc_switch_high,
+                        rc_channel_pwm=vehicle_state.rc_channel_pwm(
+                            config.mavlink.follow_enable_channel
+                        ),
+                        gate_text="rc gate bypassed",
+                    )
                 else:
-                    follow_allowed = gate.follow_allowed
-                    gate_text = (
-                        f"mode_guided={gate.guided_mode} rc_high={gate.rc_switch_high}"
+                    gate_snapshot = GateSnapshot(
+                        follow_allowed=gate.follow_allowed,
+                        guided_mode=gate.guided_mode,
+                        rc_switch_high=gate.rc_switch_high,
+                        rc_channel_pwm=vehicle_state.rc_channel_pwm(
+                            config.mavlink.follow_enable_channel
+                        ),
+                        gate_text=(
+                            f"mode_guided={gate.guided_mode} "
+                            f"rc_high={gate.rc_switch_high}"
+                        ),
                     )
 
-            command = controller.step(
-                observation, loop_started_s, follow_allowed=follow_allowed
-            )
+            if orbit_status.active and not gate_snapshot.follow_allowed:
+                orbit_controller.abort("orbit aborted: follow disabled")
+                orbit_status = orbit_controller.status
 
+            if config.pose.hand_raise_circle_enabled and pose_estimator is not None:
+                if orbit_status.active:
+                    pose_result = PoseGestureResult(
+                        sampled=False,
+                        right_hand_up=last_pose_result.right_hand_up,
+                        reason="pose paused during orbit",
+                    )
+                elif observation is None:
+                    pose_result = PoseGestureResult(
+                        sampled=False,
+                        right_hand_up=last_pose_result.right_hand_up,
+                        reason="pose waiting for target",
+                    )
+                elif (
+                    loop_started_s - last_pose_sample_s
+                    >= config.pose.inference_interval_s
+                ):
+                    last_pose_sample_s = loop_started_s
+                    pose_result = pose_estimator.estimate_for_observation(
+                        frame,
+                        observation,
+                        frame_width=config.camera.width,
+                        frame_height=config.camera.height,
+                    )
+                    last_pose_result = pose_result
+                    if pose_result.right_hand_up is False:
+                        hand_raise_latched = False
+                    if (
+                        pose_result.right_hand_up is True
+                        and not hand_raise_latched
+                        and (
+                            loop_started_s - last_orbit_trigger_s
+                            >= config.pose.trigger_cooldown_s
+                        )
+                    ):
+                        orbit_controller.start(loop_started_s)
+                        orbit_status = orbit_controller.status
+                        last_orbit_trigger_s = loop_started_s
+                        hand_raise_latched = True
+                        print("[orbit] triggered by raised right hand")
+
+            control_started_s = time.monotonic()
+            orbit_command = orbit_controller.step(
+                observation,
+                loop_started_s,
+                follow_allowed=gate_snapshot.follow_allowed,
+            )
+            if orbit_command is not None:
+                controller.step(
+                    observation,
+                    loop_started_s,
+                    follow_allowed=False,
+                )
+                command = orbit_command
+            else:
+                command = controller.step(
+                    observation,
+                    loop_started_s,
+                    follow_allowed=gate_snapshot.follow_allowed,
+                )
+            control_latency_s = time.monotonic() - control_started_s
+            orbit_status = orbit_controller.status
+
+            mavlink_started_s = time.monotonic()
             if mavlink is not None:
-                if follow_allowed:
+                if gate_snapshot.follow_allowed:
                     mavlink.send_follow_command(command)
                 else:
                     mavlink.send_zero_once(reason=command.reason)
+            mavlink_latency_s = time.monotonic() - mavlink_started_s
+
+            total_loop_latency_s = time.monotonic() - loop_started_s
+            dt_s = (
+                frame_interval_s
+                if last_frame_started_s is None
+                else max(loop_started_s - last_frame_started_s, 1e-3)
+            )
+            last_frame_started_s = loop_started_s
+
+            if logger is not None:
+                logger.log_detections(
+                    frame_index=frame_index,
+                    detections=detections,
+                    frame_width=config.camera.width,
+                    frame_height=config.camera.height,
+                )
+                logger.log_tracks(
+                    frame_index=frame_index,
+                    tracks=tracks,
+                    frame_width=config.camera.width,
+                    frame_height=config.camera.height,
+                )
+                logger.log_frame(
+                    frame_index=frame_index,
+                    now_s=loop_started_s,
+                    dt_s=dt_s,
+                    frame_width=config.camera.width,
+                    frame_height=config.camera.height,
+                    detections_count=len(detections),
+                    tracks_count=len(tracks),
+                    observation=observation,
+                    target_angles=target_angles,
+                    command=command,
+                    gate=gate_snapshot,
+                    vehicle_state=vehicle_state,
+                    pose_sampled=pose_result.sampled,
+                    pose_right_hand_up=pose_result.right_hand_up,
+                    pose_reason=pose_result.reason,
+                    orbit_active=orbit_status.active,
+                    orbit_progress_deg=orbit_status.progress_rad * (180.0 / 3.141592653589793),
+                    orbit_reason=orbit_status.reason,
+                    timings=TimingSnapshot(
+                        frame_grab_latency_s=frame_grab_latency_s,
+                        detection_latency_s=detection_latency_s,
+                        tracking_latency_s=tracking_latency_s,
+                        selection_latency_s=selection_latency_s,
+                        control_latency_s=control_latency_s,
+                        mavlink_latency_s=mavlink_latency_s,
+                        total_loop_latency_s=total_loop_latency_s,
+                    ),
+                )
 
             if loop_started_s - last_log_s >= 1.0:
                 last_log_s = loop_started_s
@@ -390,7 +616,8 @@ def run(config: AppConfig) -> int:
                     f"vx={command.velocity_forward_m_s:+.2f} "
                     f"vy={command.velocity_right_m_s:+.2f} "
                     f"yaw={command.yaw_rate_rad_s:+.2f} "
-                    f"gate={gate_text}"
+                    f"gate={gate_snapshot.gate_text} "
+                    f"orbit_active={orbit_status.active}"
                 )
 
             if config.runtime.visualize or recorder is not None:
@@ -399,11 +626,21 @@ def run(config: AppConfig) -> int:
                     frame,
                     observation,
                     command,
-                    follow_allowed,
-                    gate_text,
+                    gate_snapshot.follow_allowed,
+                    gate_snapshot.gate_text,
                     detection_count=len(detections),
                     track_count=len(tracks),
                     area_ratio=area_ratio,
+                    pose_status_text=(
+                        f"pose sampled={pose_result.sampled} "
+                        f"hand_up={pose_result.right_hand_up} "
+                        f"reason={pose_result.reason}"
+                    ),
+                    orbit_status_text=(
+                        f"orbit active={orbit_status.active} "
+                        f"progress_deg={orbit_status.progress_rad * (180.0 / 3.141592653589793):.0f} "
+                        f"reason={orbit_status.reason}"
+                    ),
                 )
 
             if recorder is not None:
@@ -421,6 +658,8 @@ def run(config: AppConfig) -> int:
                 time.sleep(remaining_s)
     finally:
         capture.release()
+        if logger is not None:
+            logger.close()
         if recorder is not None:
             recorder.close()
         if config.runtime.visualize:

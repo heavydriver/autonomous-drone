@@ -19,6 +19,7 @@ class ConfigLoadTest(unittest.TestCase):
         payload = {
             "camera": {"mount_pitch_deg": 12.5},
             "tracking": {"model_path": "/tmp/model.pt"},
+            "pose": {"hand_raise_circle_enabled": True, "inference_interval_s": 6.0},
             "runtime": {"skip_rc_gate": True, "video_source": "test-pipeline"},
         }
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -29,6 +30,8 @@ class ConfigLoadTest(unittest.TestCase):
         config_dict = config_to_dict(config)
         self.assertEqual(config_dict["camera"]["mount_pitch_deg"], 12.5)
         self.assertEqual(config_dict["tracking"]["model_path"], "/tmp/model.pt")
+        self.assertTrue(config_dict["pose"]["hand_raise_circle_enabled"])
+        self.assertEqual(config_dict["pose"]["inference_interval_s"], 6.0)
         self.assertTrue(config_dict["runtime"]["skip_rc_gate"])
         self.assertEqual(config_dict["runtime"]["video_source"], "test-pipeline")
 
