@@ -21,7 +21,9 @@
     "acquisition_confirm_frames": 3,
     "tracker_frame_rate": 10.0,
     "tracker_track_buffer": 30,
-    "tracker_match_thresh": 0.8
+    "tracker_match_thresh": 0.8,
+    "selector_reacquire_min_iou": 0.05,
+    "selector_reacquire_max_center_shift_ratio": 1.1
   },
   "control": {
     "loop_rate_hz": 10.0,
@@ -47,6 +49,28 @@
     "stand_off_distance_m": 4.0,
     "hold_altitude_m": 2.4,
     "max_roll_pitch_deg": 10.0
+  },
+  "pose": {
+    "hand_raise_circle_enabled": false,
+    "model_path": "/home/radxa/autonomous-drone/yolo11n-pose_ncnn_model",
+    "inference_interval_s": 7.0,
+    "min_bbox_area_ratio": 0.01,
+    "crop_margin_ratio": 0.12,
+    "min_keypoint_confidence": 0.35,
+    "wrist_above_shoulder_margin_ratio": 0.05,
+    "wrist_above_elbow_margin_ratio": 0.02,
+    "max_wrist_shoulder_offset_ratio": 0.35,
+    "trigger_cooldown_s": 10.0
+  },
+  "orbit": {
+    "clockwise": true,
+    "lateral_speed_m_s": 0.4,
+    "forward_correction_gain": 4.0,
+    "max_forward_correction_m_s": 0.3,
+    "yaw_gain": 1.2,
+    "max_yaw_rate_deg_s": 18.0,
+    "completion_angle_deg": 360.0,
+    "max_duration_s": 90.0
   },
   "runtime": {
     "dry_run": false,
