@@ -10,13 +10,15 @@ from datetime import datetime
 from pathlib import Path
 
 from autonomous_drone.config import AppConfig, config_to_dict, load_config_file
-from autonomous_drone.control import FollowController
+from autonomous_drone.control import FollowController, OrbitController
 from autonomous_drone.mavlink import MavlinkFollowerClient
 from autonomous_drone.metrics import CsvRunLogger, GateSnapshot, TimingSnapshot
 from autonomous_drone.perception import (
     ByteTrackPersonTracker,
     PrimaryTargetSelector,
+    PoseGestureResult,
     YoloPersonDetector,
+    YoloPoseEstimator,
 )
 
 
@@ -36,6 +38,9 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--model")
     parser.add_argument("--device")
     parser.add_argument("--mount-pitch-deg", type=float)
+    parser.add_argument("--enable-hand-raise-circle", action="store_true")
+    parser.add_argument("--pose-model")
+    parser.add_argument("--pose-interval-s", type=float)
     parser.add_argument("--dry-run", action="store_true")
     parser.add_argument("--skip-rc-gate", action="store_true")
     parser.add_argument("--visualize", action="store_true")
@@ -85,6 +90,12 @@ def build_config(args: argparse.Namespace) -> AppConfig:
         config.runtime.model_device = args.device
     if args.mount_pitch_deg is not None:
         config.camera.mount_pitch_deg = args.mount_pitch_deg
+    if args.enable_hand_raise_circle:
+        config.pose.hand_raise_circle_enabled = True
+    if args.pose_model is not None:
+        config.pose.model_path = args.pose_model
+    if args.pose_interval_s is not None:
+        config.pose.inference_interval_s = args.pose_interval_s
     if args.dry_run:
         config.runtime.dry_run = True
     if args.skip_rc_gate:
@@ -151,6 +162,8 @@ def draw_overlay(
     detection_count: int,
     track_count: int,
     area_ratio: float | None,
+    pose_status_text: str,
+    orbit_status_text: str,
 ) -> None:
     """Draw lightweight debugging overlays for local testing."""
 
@@ -218,6 +231,24 @@ def draw_overlay(
         cv2.FONT_HERSHEY_SIMPLEX,
         0.55,
         (200, 220, 255),
+        2,
+    )
+    cv2.putText(
+        frame,
+        pose_status_text,
+        (10, 128),
+        cv2.FONT_HERSHEY_SIMPLEX,
+        0.55,
+        (180, 220, 255),
+        2,
+    )
+    cv2.putText(
+        frame,
+        orbit_status_text,
+        (10, 154),
+        cv2.FONT_HERSHEY_SIMPLEX,
+        0.55,
+        (150, 255, 150),
         2,
     )
 
@@ -313,9 +344,26 @@ def run(config: AppConfig) -> int:
     """Run the main follow loop."""
 
     controller = FollowController(config.camera, config.tracking, config.control)
+    orbit_controller = OrbitController(
+        config.camera,
+        config.tracking,
+        config.control,
+        config.safety,
+        config.orbit,
+    )
     detector = YoloPersonDetector(config.tracking, device=config.runtime.model_device)
     tracker = ByteTrackPersonTracker(config.tracking)
     selector = PrimaryTargetSelector(config=config.tracking)
+    pose_estimator = None
+    if config.pose.hand_raise_circle_enabled:
+        print(
+            "[pose] enabling right-hand orbit trigger with "
+            f"{config.pose.model_path}"
+        )
+        pose_estimator = YoloPoseEstimator(
+            config.pose, device=config.runtime.model_device
+        )
+
     mavlink = None
     if not config.runtime.dry_run:
         print(
@@ -331,6 +379,16 @@ def run(config: AppConfig) -> int:
     frame_interval_s = 1.0 / config.control.loop_rate_hz
     last_log_s = 0.0
     last_frame_started_s: float | None = None
+    last_pose_sample_s = float("-inf")
+    last_orbit_trigger_s = float("-inf")
+    hand_raise_latched = False
+    last_pose_result = PoseGestureResult(
+        sampled=False,
+        right_hand_up=None,
+        reason="pose feature disabled"
+        if not config.pose.hand_raise_circle_enabled
+        else "pose idle",
+    )
     recorder = None
     logger = None
     if config.runtime.log_data:
@@ -381,6 +439,12 @@ def run(config: AppConfig) -> int:
                     config.camera.height,
                 )
                 target_angles = controller.compute_target_angles(observation)
+            pose_result = PoseGestureResult(
+                sampled=False,
+                right_hand_up=last_pose_result.right_hand_up,
+                reason=last_pose_result.reason,
+            )
+            orbit_status = orbit_controller.status
 
             gate_snapshot = GateSnapshot(
                 follow_allowed=True,
@@ -417,13 +481,72 @@ def run(config: AppConfig) -> int:
                         ),
                     )
 
+            if orbit_status.active and not gate_snapshot.follow_allowed:
+                orbit_controller.abort("orbit aborted: follow disabled")
+                orbit_status = orbit_controller.status
+
+            if config.pose.hand_raise_circle_enabled and pose_estimator is not None:
+                if orbit_status.active:
+                    pose_result = PoseGestureResult(
+                        sampled=False,
+                        right_hand_up=last_pose_result.right_hand_up,
+                        reason="pose paused during orbit",
+                    )
+                elif observation is None:
+                    pose_result = PoseGestureResult(
+                        sampled=False,
+                        right_hand_up=last_pose_result.right_hand_up,
+                        reason="pose waiting for target",
+                    )
+                elif (
+                    loop_started_s - last_pose_sample_s
+                    >= config.pose.inference_interval_s
+                ):
+                    last_pose_sample_s = loop_started_s
+                    pose_result = pose_estimator.estimate_for_observation(
+                        frame,
+                        observation,
+                        frame_width=config.camera.width,
+                        frame_height=config.camera.height,
+                    )
+                    last_pose_result = pose_result
+                    if pose_result.right_hand_up is False:
+                        hand_raise_latched = False
+                    if (
+                        pose_result.right_hand_up is True
+                        and not hand_raise_latched
+                        and (
+                            loop_started_s - last_orbit_trigger_s
+                            >= config.pose.trigger_cooldown_s
+                        )
+                    ):
+                        orbit_controller.start(loop_started_s)
+                        orbit_status = orbit_controller.status
+                        last_orbit_trigger_s = loop_started_s
+                        hand_raise_latched = True
+                        print("[orbit] triggered by raised right hand")
+
             control_started_s = time.monotonic()
-            command = controller.step(
+            orbit_command = orbit_controller.step(
                 observation,
                 loop_started_s,
                 follow_allowed=gate_snapshot.follow_allowed,
             )
+            if orbit_command is not None:
+                controller.step(
+                    observation,
+                    loop_started_s,
+                    follow_allowed=False,
+                )
+                command = orbit_command
+            else:
+                command = controller.step(
+                    observation,
+                    loop_started_s,
+                    follow_allowed=gate_snapshot.follow_allowed,
+                )
             control_latency_s = time.monotonic() - control_started_s
+            orbit_status = orbit_controller.status
 
             mavlink_started_s = time.monotonic()
             if mavlink is not None:
@@ -467,6 +590,12 @@ def run(config: AppConfig) -> int:
                     command=command,
                     gate=gate_snapshot,
                     vehicle_state=vehicle_state,
+                    pose_sampled=pose_result.sampled,
+                    pose_right_hand_up=pose_result.right_hand_up,
+                    pose_reason=pose_result.reason,
+                    orbit_active=orbit_status.active,
+                    orbit_progress_deg=orbit_status.progress_rad * (180.0 / 3.141592653589793),
+                    orbit_reason=orbit_status.reason,
                     timings=TimingSnapshot(
                         frame_grab_latency_s=frame_grab_latency_s,
                         detection_latency_s=detection_latency_s,
@@ -487,7 +616,8 @@ def run(config: AppConfig) -> int:
                     f"vx={command.velocity_forward_m_s:+.2f} "
                     f"vy={command.velocity_right_m_s:+.2f} "
                     f"yaw={command.yaw_rate_rad_s:+.2f} "
-                    f"gate={gate_snapshot.gate_text}"
+                    f"gate={gate_snapshot.gate_text} "
+                    f"orbit_active={orbit_status.active}"
                 )
 
             if config.runtime.visualize or recorder is not None:
@@ -501,6 +631,16 @@ def run(config: AppConfig) -> int:
                     detection_count=len(detections),
                     track_count=len(tracks),
                     area_ratio=area_ratio,
+                    pose_status_text=(
+                        f"pose sampled={pose_result.sampled} "
+                        f"hand_up={pose_result.right_hand_up} "
+                        f"reason={pose_result.reason}"
+                    ),
+                    orbit_status_text=(
+                        f"orbit active={orbit_status.active} "
+                        f"progress_deg={orbit_status.progress_rad * (180.0 / 3.141592653589793):.0f} "
+                        f"reason={orbit_status.reason}"
+                    ),
                 )
 
             if recorder is not None:

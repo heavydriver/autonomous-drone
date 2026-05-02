@@ -1,11 +1,17 @@
-"""Simple person-follow controller centered on image alignment and standoff."""
+"""Simple person-follow and orbit controllers for person-centric flight."""
 
 from __future__ import annotations
 
 import math
 from dataclasses import dataclass
 
-from autonomous_drone.config import CameraConfig, ControlConfig, TrackingConfig
+from autonomous_drone.config import (
+    CameraConfig,
+    ControlConfig,
+    OrbitConfig,
+    SafetyConfig,
+    TrackingConfig,
+)
 from autonomous_drone.models import FollowCommand, TargetObservation
 
 
@@ -16,6 +22,15 @@ class TargetAngles:
     horizontal_rad: float
     vertical_camera_rad: float
     vertical_body_rad: float
+
+
+@dataclass(frozen=True, slots=True)
+class OrbitStatus:
+    """Current state of the optional one-shot orbit maneuver."""
+
+    active: bool
+    progress_rad: float
+    reason: str
 
 
 def _clamp(value: float, minimum: float, maximum: float) -> float:
@@ -40,6 +55,36 @@ def _rate_limit(current: float, target: float, max_delta: float) -> float:
     if target < current - max_delta:
         return current - max_delta
     return target
+
+
+def compute_target_angles(
+    camera: CameraConfig,
+    observation: TargetObservation,
+) -> TargetAngles:
+    """Convert a target box center into camera/body angular offsets."""
+
+    frame_half_width = camera.width * 0.5
+    frame_half_height = camera.height * 0.5
+    normalized_x = _clamp(
+        (observation.bbox.center_x - frame_half_width) / frame_half_width,
+        -1.0,
+        1.0,
+    )
+    normalized_y = _clamp(
+        (observation.bbox.center_y - frame_half_height) / frame_half_height,
+        -1.0,
+        1.0,
+    )
+    half_hfov_rad = math.radians(camera.horizontal_fov_deg) * 0.5
+    half_vfov_rad = math.radians(camera.vertical_fov_deg) * 0.5
+    horizontal_rad = math.atan(normalized_x * math.tan(half_hfov_rad))
+    vertical_camera_rad = math.atan(normalized_y * math.tan(half_vfov_rad))
+    vertical_body_rad = vertical_camera_rad + math.radians(camera.mount_pitch_deg)
+    return TargetAngles(
+        horizontal_rad=horizontal_rad,
+        vertical_camera_rad=vertical_camera_rad,
+        vertical_body_rad=vertical_body_rad,
+    )
 
 
 class FollowController:
@@ -136,28 +181,7 @@ class FollowController:
     def compute_target_angles(self, observation: TargetObservation) -> TargetAngles:
         """Convert a target box center into camera/body angular offsets."""
 
-        frame_half_width = self._camera.width * 0.5
-        frame_half_height = self._camera.height * 0.5
-        normalized_x = _clamp(
-            (observation.bbox.center_x - frame_half_width) / frame_half_width,
-            -1.0,
-            1.0,
-        )
-        normalized_y = _clamp(
-            (observation.bbox.center_y - frame_half_height) / frame_half_height,
-            -1.0,
-            1.0,
-        )
-        half_hfov_rad = math.radians(self._camera.horizontal_fov_deg) * 0.5
-        half_vfov_rad = math.radians(self._camera.vertical_fov_deg) * 0.5
-        horizontal_rad = math.atan(normalized_x * math.tan(half_hfov_rad))
-        vertical_camera_rad = math.atan(normalized_y * math.tan(half_vfov_rad))
-        vertical_body_rad = vertical_camera_rad + math.radians(self._camera.mount_pitch_deg)
-        return TargetAngles(
-            horizontal_rad=horizontal_rad,
-            vertical_camera_rad=vertical_camera_rad,
-            vertical_body_rad=vertical_body_rad,
-        )
+        return compute_target_angles(self._camera, observation)
 
     def _compute_dt(self, now_s: float) -> float:
         """Compute a sane control-step delta time."""
@@ -246,6 +270,191 @@ class FollowController:
 
     def _apply_rate_limits(self, target: FollowCommand, dt: float) -> FollowCommand:
         """Apply slew-rate limits to the commanded outputs."""
+
+        max_speed_delta = self._control.speed_slew_limit_m_s2 * dt
+        max_yaw_delta = math.radians(self._control.yaw_slew_limit_deg_s2) * dt
+        limited = FollowCommand(
+            velocity_forward_m_s=_rate_limit(
+                self._last_command.velocity_forward_m_s,
+                target.velocity_forward_m_s,
+                max_speed_delta,
+            ),
+            velocity_right_m_s=_rate_limit(
+                self._last_command.velocity_right_m_s,
+                target.velocity_right_m_s,
+                max_speed_delta,
+            ),
+            velocity_down_m_s=_rate_limit(
+                self._last_command.velocity_down_m_s,
+                target.velocity_down_m_s,
+                max_speed_delta,
+            ),
+            yaw_rate_rad_s=_rate_limit(
+                self._last_command.yaw_rate_rad_s,
+                target.yaw_rate_rad_s,
+                max_yaw_delta,
+            ),
+            active=target.active,
+            reason=target.reason,
+        )
+        self._last_command = limited
+        return limited
+
+
+class OrbitController:
+    """Generate a single conservative orbit around the selected person.
+
+    The orbit is intentionally body-frame and target-relative: it commands a bounded
+    lateral velocity, uses forward correction to hold stand-off, and adds yaw
+    feed-forward plus image-based correction so the drone circles the person once
+    before yielding back to normal follow behavior.
+    """
+
+    def __init__(
+        self,
+        camera: CameraConfig,
+        tracking: TrackingConfig,
+        control: ControlConfig,
+        safety: SafetyConfig,
+        orbit: OrbitConfig,
+    ) -> None:
+        """Initialize the orbit controller."""
+
+        self._camera = camera
+        self._tracking = tracking
+        self._control = control
+        self._safety = safety
+        self._orbit = orbit
+        self._active = False
+        self._progress_rad = 0.0
+        self._started_s: float | None = None
+        self._last_update_s: float | None = None
+        self._last_reason = "orbit idle"
+        self._last_command = FollowCommand.zero("orbit idle")
+
+    @property
+    def status(self) -> OrbitStatus:
+        """Return the current orbit state."""
+
+        return OrbitStatus(
+            active=self._active,
+            progress_rad=self._progress_rad,
+            reason=self._last_reason,
+        )
+
+    def start(self, now_s: float) -> None:
+        """Begin a new one-shot orbit from the current target state."""
+
+        self._active = True
+        self._progress_rad = 0.0
+        self._started_s = now_s
+        self._last_update_s = now_s
+        self._last_reason = "orbit active"
+        self._last_command = FollowCommand.zero("orbit active")
+
+    def abort(self, reason: str) -> None:
+        """Abort the orbit and clear internal state."""
+
+        self._active = False
+        self._progress_rad = 0.0
+        self._started_s = None
+        self._last_update_s = None
+        self._last_reason = reason
+        self._last_command = FollowCommand.zero(reason)
+
+    def step(
+        self,
+        observation: TargetObservation | None,
+        now_s: float,
+        follow_allowed: bool,
+    ) -> FollowCommand | None:
+        """Advance the orbit and return the override command when active.
+
+        Args:
+            observation: Current tracked target, or ``None`` if unavailable.
+            now_s: Monotonic timestamp in seconds.
+            follow_allowed: Whether external gates still permit autonomy.
+
+        Returns:
+            A maneuver override command while the orbit is active. Returns ``None``
+            when the orbit has completed or is inactive so the caller can fall back
+            to normal follow behavior.
+        """
+
+        if not self._active:
+            return None
+        if not follow_allowed:
+            self.abort("orbit aborted: follow disabled")
+            return None
+        if observation is None:
+            self.abort("orbit aborted: target missing")
+            return FollowCommand.zero("orbit target missing")
+
+        dt = self._compute_dt(now_s)
+        if self._started_s is not None and (
+            now_s - self._started_s >= self._orbit.max_duration_s
+        ):
+            self.abort("orbit timed out")
+            return None
+
+        command = self._compute_orbit_command(observation, dt)
+        if self._progress_rad >= math.radians(self._orbit.completion_angle_deg):
+            self.abort("orbit complete")
+            return None
+        return command
+
+    def _compute_dt(self, now_s: float) -> float:
+        """Compute a bounded orbit update period."""
+
+        if self._last_update_s is None:
+            self._last_update_s = now_s
+            return 1.0 / self._control.loop_rate_hz
+        dt = max(now_s - self._last_update_s, 1e-3)
+        self._last_update_s = now_s
+        return dt
+
+    def _compute_orbit_command(
+        self,
+        observation: TargetObservation,
+        dt: float,
+    ) -> FollowCommand:
+        """Build one conservative orbit step around the current target."""
+
+        direction_sign = 1.0 if self._orbit.clockwise else -1.0
+        stand_off_distance_m = max(self._safety.stand_off_distance_m, 0.5)
+        angles = compute_target_angles(self._camera, observation)
+        area_ratio = observation.bbox.area_ratio(self._camera.width, self._camera.height)
+        area_error = self._tracking.desired_box_area_ratio - area_ratio
+        forward_correction_m_s = _clamp(
+            area_error * self._orbit.forward_correction_gain,
+            -self._orbit.max_forward_correction_m_s,
+            self._orbit.max_forward_correction_m_s,
+        )
+        if area_ratio >= self._tracking.emergency_stop_area_ratio:
+            forward_correction_m_s = min(forward_correction_m_s, 0.0)
+
+        yaw_feed_forward_rad_s = direction_sign * (
+            self._orbit.lateral_speed_m_s / stand_off_distance_m
+        )
+        yaw_correction_rad_s = self._orbit.yaw_gain * angles.horizontal_rad
+        command = FollowCommand(
+            velocity_forward_m_s=forward_correction_m_s,
+            velocity_right_m_s=direction_sign * self._orbit.lateral_speed_m_s,
+            velocity_down_m_s=0.0,
+            yaw_rate_rad_s=_clamp(
+                yaw_feed_forward_rad_s + yaw_correction_rad_s,
+                -math.radians(self._orbit.max_yaw_rate_deg_s),
+                math.radians(self._orbit.max_yaw_rate_deg_s),
+            ),
+            active=True,
+            reason="orbiting target",
+        )
+        self._progress_rad += abs(self._orbit.lateral_speed_m_s) * dt / stand_off_distance_m
+        self._last_reason = "orbit active"
+        return self._apply_rate_limits(command, dt)
+
+    def _apply_rate_limits(self, target: FollowCommand, dt: float) -> FollowCommand:
+        """Apply the standard conservative slew-rate limits to orbit commands."""
 
         max_speed_delta = self._control.speed_slew_limit_m_s2 * dt
         max_yaw_delta = math.radians(self._control.yaw_slew_limit_deg_s2) * dt

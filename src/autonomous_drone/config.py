@@ -134,6 +134,36 @@ class SafetyConfig:
 
 
 @dataclass(slots=True)
+class PoseConfig:
+    """Optional pose-estimation settings for gesture-triggered behaviors."""
+
+    hand_raise_circle_enabled: bool = False
+    model_path: str = "yolo-checkpoints/yolo11n-pose.pt"
+    inference_interval_s: float = 7.0
+    min_bbox_area_ratio: float = 0.01
+    crop_margin_ratio: float = 0.12
+    min_keypoint_confidence: float = 0.35
+    wrist_above_shoulder_margin_ratio: float = 0.05
+    wrist_above_elbow_margin_ratio: float = 0.02
+    max_wrist_shoulder_offset_ratio: float = 0.35
+    trigger_cooldown_s: float = 10.0
+
+
+@dataclass(slots=True)
+class OrbitConfig:
+    """Parameters for a single conservative orbit around the tracked person."""
+
+    clockwise: bool = True
+    lateral_speed_m_s: float = 0.4
+    forward_correction_gain: float = 4.0
+    max_forward_correction_m_s: float = 0.3
+    yaw_gain: float = 1.2
+    max_yaw_rate_deg_s: float = 18.0
+    completion_angle_deg: float = 360.0
+    max_duration_s: float = 90.0
+
+
+@dataclass(slots=True)
 class RuntimeConfig:
     """Runtime behavior for SITL and local testing."""
 
@@ -159,6 +189,8 @@ class AppConfig:
     tracking: TrackingConfig = field(default_factory=TrackingConfig)
     control: ControlConfig = field(default_factory=ControlConfig)
     safety: SafetyConfig = field(default_factory=SafetyConfig)
+    pose: PoseConfig = field(default_factory=PoseConfig)
+    orbit: OrbitConfig = field(default_factory=OrbitConfig)
     runtime: RuntimeConfig = field(default_factory=RuntimeConfig)
 
 

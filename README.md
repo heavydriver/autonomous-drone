@@ -9,8 +9,10 @@ The pipeline is:
 1. YOLO detects people in each frame.
 2. ByteTrack links detections across frames and helps keep a stable target ID.
 3. The target selector keeps the same person locked when tracking blips or IDs shift.
-4. The follow controller tries to keep the person near the center of the frame and maintain a configurable stand-off distance using body-frame velocity and yaw-rate commands.
-5. MAVLink gating ensures follow commands only run when the required vehicle state allows it.
+4. An optional YOLO pose model can sample the selected person every few seconds and detect a conservative right-hand-raised gesture.
+5. The follow controller tries to keep the person near the center of the frame and maintain a configurable stand-off distance using body-frame velocity and yaw-rate commands.
+6. When enabled, a raised right hand triggers one bounded orbit around the selected person, then normal follow resumes.
+7. MAVLink gating ensures both follow and orbit commands only run when the required vehicle state allows it.
 
 ## Project Layout
 
@@ -68,6 +70,8 @@ Useful flags:
 - `--transport serial --serial-device /dev/ttyUSB0 --baud 921600` selects a UART-connected flight controller
 - `--skip-rc-gate` lets you test in `GUIDED` mode without needing the RC switch in SITL
 - `--dry-run` runs detection, tracking, and control without sending MAVLink commands
+- `--enable-hand-raise-circle` enables the optional pose-triggered one-shot orbit behavior
+- `--pose-model /path/to/yolo11n-pose.pt` points the gesture feature at YOLO pose weights
 - `--visualize` shows the detection box, target ID, `area_ratio`, and command overlay
 - `--log-data` writes per-frame, detection, and tracking CSVs into `logs/`
 - `--log-output-dir PATH` changes the CSV output directory from the default `logs/`
@@ -80,8 +84,24 @@ python -m autonomous_drone.app \
   --config ../configs/sitl_follow.local.json \
   --log-data \
   --skip-rc-gate \
+  --enable-hand-raise-circle \
+  --pose-model /absolute/path/to/yolo11n-pose.pt \
   --visualize
 ```
+
+## Hand-Raise Orbit Feature
+
+When `pose.hand_raise_circle_enabled` is `true` or `--enable-hand-raise-circle` is passed:
+
+- the app runs YOLO pose estimation on the selected person's crop every `pose.inference_interval_s`
+- a conservative right-hand-raised gesture can trigger exactly one orbit
+- the orbit uses the existing `GUIDED` body-frame command path, not ArduPilot's native `CIRCLE` mode
+- if `GUIDED` is lost, the RC enable switch drops low, the target is lost, or the maneuver times out, the orbit is aborted and autonomy yields immediately
+
+The feature expects a local YOLO pose weights file such as `yolo11n-pose.pt`. The detector and pose models are configured separately:
+
+- `tracking.model_path` is used for person detection
+- `pose.model_path` is used for gesture-triggered pose estimation
 
 ## Evaluation Logging
 
@@ -197,5 +217,7 @@ python -m autonomous_drone.app \
 ## Notes
 
 - The app expects a local YOLO weights file and does not download one automatically.
+- The pose-triggered orbit feature expects a local YOLO pose weights file and is disabled by default.
 - Fixed-altitude following is the current mode
 - Lateral/Roll motion is still disabled
+- The one-shot orbit is implemented in `GUIDED` with bounded velocity and yaw commands instead of switching to ArduPilot `CIRCLE`, because native `CIRCLE` orbits a point fixed when the mode is entered rather than a moving tracked person. Reference: <https://ardupilot.org/copter/docs/circle-mode.html>

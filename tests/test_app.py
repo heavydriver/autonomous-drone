@@ -101,6 +101,25 @@ class AppCliConfigTest(unittest.TestCase):
         self.assertTrue(config.runtime.log_data)
         self.assertEqual(config.runtime.log_output_dir, "logs/custom")
 
+    def test_pose_flags_enable_hand_raise_circle(self) -> None:
+        """Pose flags should enable the optional hand-raise orbit feature."""
+
+        args = parse_args(
+            [
+                "--enable-hand-raise-circle",
+                "--pose-model",
+                "/tmp/yolo11n-pose.pt",
+                "--pose-interval-s",
+                "6.5",
+            ]
+        )
+
+        config = build_config(args)
+
+        self.assertTrue(config.pose.hand_raise_circle_enabled)
+        self.assertEqual(config.pose.model_path, "/tmp/yolo11n-pose.pt")
+        self.assertEqual(config.pose.inference_interval_s, 6.5)
+
 
 class _FakeFrame:
     """Minimal frame object exposing the shape OpenCV code expects."""
