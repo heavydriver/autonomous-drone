@@ -85,6 +85,22 @@ class AppCliConfigTest(unittest.TestCase):
         self.assertEqual(config.runtime.recording_output_dir, "captures")
         self.assertEqual(config.runtime.recording_clip_duration_s, 45.0)
 
+    def test_log_flags_enable_csv_logging(self) -> None:
+        """Logging flags should opt in to CSV metrics output."""
+
+        args = parse_args(
+            [
+                "--log-data",
+                "--log-output-dir",
+                "logs/custom",
+            ]
+        )
+
+        config = build_config(args)
+
+        self.assertTrue(config.runtime.log_data)
+        self.assertEqual(config.runtime.log_output_dir, "logs/custom")
+
 
 class _FakeFrame:
     """Minimal frame object exposing the shape OpenCV code expects."""

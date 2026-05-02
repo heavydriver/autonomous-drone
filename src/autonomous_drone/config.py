@@ -140,6 +140,8 @@ class RuntimeConfig:
     dry_run: bool = False
     skip_rc_gate: bool = False
     visualize: bool = False
+    log_data: bool = False
+    log_output_dir: str = "logs"
     record_annotated_video: bool = False
     recording_output_dir: str = "recordings"
     recording_clip_duration_s: float = 30.0

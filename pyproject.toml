@@ -8,6 +8,8 @@ version = "0.1.0"
 description = "SITL-first person-follow control stack for ArduPilot using pymavlink and ByteTrack."
 requires-python = ">=3.10"
 dependencies = [
+    "matplotlib>=3.10.0",
+    "psutil>=7.0.0",
     "pymavlink>=2.4.49",
     "supervision>=0.23.0",
     "ultralytics>=8.3.0",
@@ -15,6 +17,7 @@ dependencies = [
 
 [project.scripts]
 drone-follower = "autonomous_drone.app:main"
+drone-follower-graphs = "autonomous_drone.generate_graphs:main"
 
 [tool.setuptools]
 package-dir = {"" = "src"}
