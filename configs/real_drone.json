@@ -1,0 +1,59 @@
+{
+  "camera": {
+    "mount_pitch_deg": 10.0
+  },
+  "mavlink": {
+    "transport": "serial",
+    "serial_device": "/dev/serial/by-id/usb-ArduPilot_speedybeef4v4_320058001651333532323534-if00",
+    "baud_rate": 921600,
+    "follow_enable_channel": 8,
+    "follow_enable_high_pwm": 1800,
+    "guided_mode_name": "GUIDED",
+    "stream_rate_hz": 10
+  },
+  "tracking": {
+    "model_path": "/home/radxa/autonomous-drone/yolo11n_ncnn_model",
+    "detector_confidence": 0.4,
+    "min_box_area_ratio": 0.005,
+    "desired_box_area_ratio": 0.08,
+    "emergency_stop_area_ratio": 0.18,
+    "loss_timeout_s": 0.6,
+    "acquisition_confirm_frames": 3,
+    "tracker_frame_rate": 10.0,
+    "tracker_track_buffer": 30,
+    "tracker_match_thresh": 0.8
+  },
+  "control": {
+    "loop_rate_hz": 10.0,
+    "horizontal_angle_filter_alpha": 0.25,
+    "box_area_filter_alpha": 0.18,
+    "yaw_gain": 1.0,
+    "forward_gain": 6.0,
+    "lateral_gain": 0.0,
+    "yaw_deadband_deg": 4.0,
+    "horizontal_alignment_window_deg": 10.0,
+    "box_area_deadband_ratio": 0.012,
+    "max_forward_speed_m_s": 0.8,
+    "max_reverse_speed_m_s": 0.2,
+    "max_lateral_speed_m_s": 0.15,
+    "max_vertical_speed_m_s": 0.0,
+    "max_yaw_rate_deg_s": 12.0,
+    "speed_slew_limit_m_s2": 0.35,
+    "yaw_slew_limit_deg_s2": 30.0,
+    "vertical_slowdown_angle_deg": 18.0,
+    "enable_lateral_motion": false
+  },
+  "safety": {
+    "stand_off_distance_m": 4.0,
+    "hold_altitude_m": 2.4,
+    "max_roll_pitch_deg": 10.0
+  },
+  "runtime": {
+    "dry_run": false,
+    "skip_rc_gate": false,
+    "visualize": false,
+    "video_source": "libcamerasrc ! video/x-raw,width=640,height=480 ! videoflip method=rotate-180 ! videoscale ! video/x-raw,width=640,height=640 ! videoconvert ! video/x-raw,format=BGR ! appsink drop=true max-buffers=1 sync=false",
+    "video_backend": "gstreamer",
+    "model_device": "vulkan:0"
+  }
+}
