@@ -10,9 +10,15 @@ from datetime import datetime
 from pathlib import Path
 
 from autonomous_drone.config import AppConfig, config_to_dict, load_config_file
-from autonomous_drone.control import FollowController, OrbitController
+from autonomous_drone.control import (
+    FollowController,
+    GuidedNoGpsFollowController,
+    OrbitStatus,
+    OrbitController,
+)
 from autonomous_drone.mavlink import MavlinkFollowerClient
 from autonomous_drone.metrics import CsvRunLogger, GateSnapshot, TimingSnapshot
+from autonomous_drone.models import VehicleState
 from autonomous_drone.perception import (
     ByteTrackPersonTracker,
     PrimaryTargetSelector,
@@ -43,6 +49,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--pose-interval-s", type=float)
     parser.add_argument("--dry-run", action="store_true")
     parser.add_argument("--skip-rc-gate", action="store_true")
+    parser.add_argument("--enable-guided-nogps-follow", action="store_true")
     parser.add_argument("--visualize", action="store_true")
     parser.add_argument("--log-data", action="store_true")
     parser.add_argument("--log-output-dir")
@@ -100,6 +107,8 @@ def build_config(args: argparse.Namespace) -> AppConfig:
         config.runtime.dry_run = True
     if args.skip_rc_gate:
         config.runtime.skip_rc_gate = True
+    if args.enable_guided_nogps_follow:
+        config.runtime.enable_guided_nogps_follow = True
     if args.visualize:
         config.runtime.visualize = True
     if args.log_data:
@@ -152,6 +161,48 @@ def open_video_source(video_source: str, backend: str):
     return cv2, capture
 
 
+def format_command_text(command) -> str:
+    """Return a concise human-readable command summary for logs and overlays."""
+
+    if command.command_type == "attitude":
+        roll_deg = (
+            0.0
+            if command.attitude_roll_rad is None
+            else command.attitude_roll_rad * (180.0 / 3.141592653589793)
+        )
+        pitch_deg = (
+            0.0
+            if command.attitude_pitch_rad is None
+            else command.attitude_pitch_rad * (180.0 / 3.141592653589793)
+        )
+        yaw_deg = (
+            0.0
+            if command.attitude_yaw_rad is None
+            else command.attitude_yaw_rad * (180.0 / 3.141592653589793)
+        )
+        climb = (
+            0.5
+            if command.climb_rate_fraction is None
+            else command.climb_rate_fraction
+        )
+        return (
+            "att "
+            f"roll={roll_deg:+.1f}deg "
+            f"pitch={pitch_deg:+.1f}deg "
+            f"yaw={yaw_deg:+.1f}deg "
+            f"climb={climb:.2f} "
+            f"reason={command.reason}"
+        )
+
+    return (
+        "cmd "
+        f"vx={command.velocity_forward_m_s:+.2f} "
+        f"vy={command.velocity_right_m_s:+.2f} "
+        f"yaw={command.yaw_rate_rad_s:+.2f} "
+        f"reason={command.reason}"
+    )
+
+
 def draw_overlay(
     cv2,
     frame,
@@ -201,13 +252,7 @@ def draw_overlay(
     )
     cv2.putText(
         frame,
-        (
-            "cmd "
-            f"vx={command.velocity_forward_m_s:+.2f} "
-            f"vy={command.velocity_right_m_s:+.2f} "
-            f"yaw={command.yaw_rate_rad_s:+.2f} "
-            f"reason={command.reason}"
-        ),
+        format_command_text(command),
         (10, 50),
         cv2.FONT_HERSHEY_SIMPLEX,
         0.55,
@@ -343,19 +388,31 @@ class AnnotatedClipRecorder:
 def run(config: AppConfig) -> int:
     """Run the main follow loop."""
 
-    controller = FollowController(config.camera, config.tracking, config.control)
-    orbit_controller = OrbitController(
-        config.camera,
-        config.tracking,
-        config.control,
-        config.safety,
-        config.orbit,
-    )
+    use_guided_nogps_follow = config.runtime.enable_guided_nogps_follow
+    if use_guided_nogps_follow:
+        controller = GuidedNoGpsFollowController(
+            config.camera,
+            config.tracking,
+            config.control,
+        )
+        orbit_controller = None
+        print("[follow] using GUIDED_NOGPS attitude follower")
+    else:
+        controller = FollowController(config.camera, config.tracking, config.control)
+        orbit_controller = OrbitController(
+            config.camera,
+            config.tracking,
+            config.control,
+            config.safety,
+            config.orbit,
+        )
+        print("[follow] using GUIDED body-frame velocity follower")
     detector = YoloPersonDetector(config.tracking, device=config.runtime.model_device)
     tracker = ByteTrackPersonTracker(config.tracking)
     selector = PrimaryTargetSelector(config=config.tracking)
     pose_estimator = None
-    if config.pose.hand_raise_circle_enabled:
+    orbit_supported = orbit_controller is not None
+    if config.pose.hand_raise_circle_enabled and orbit_supported:
         print(
             "[pose] enabling right-hand orbit trigger with "
             f"{config.pose.model_path}"
@@ -363,6 +420,8 @@ def run(config: AppConfig) -> int:
         pose_estimator = YoloPoseEstimator(
             config.pose, device=config.runtime.model_device
         )
+    elif config.pose.hand_raise_circle_enabled and not orbit_supported:
+        print("[pose] hand-raise orbit trigger disabled in GUIDED_NOGPS follow mode")
 
     mavlink = None
     if not config.runtime.dry_run:
@@ -372,6 +431,16 @@ def run(config: AppConfig) -> int:
         )
         mavlink = MavlinkFollowerClient(config.mavlink)
         mavlink.connect()
+        if use_guided_nogps_follow:
+            print(
+                "[mavlink] expecting flight mode "
+                f"{config.mavlink.guided_nogps_mode_name}"
+            )
+        else:
+            print(
+                "[mavlink] expecting flight mode "
+                f"{config.mavlink.guided_mode_name}"
+            )
 
     cv2, capture = open_video_source(
         config.runtime.video_source, config.runtime.video_backend
@@ -444,7 +513,15 @@ def run(config: AppConfig) -> int:
                 right_hand_up=last_pose_result.right_hand_up,
                 reason=last_pose_result.reason,
             )
-            orbit_status = orbit_controller.status
+            orbit_status = (
+                orbit_controller.status
+                if orbit_controller is not None
+                else OrbitStatus(
+                    active=False,
+                    progress_rad=0.0,
+                    reason="orbit unsupported in GUIDED_NOGPS follow mode",
+                )
+            )
 
             gate_snapshot = GateSnapshot(
                 follow_allowed=True,
@@ -453,10 +530,19 @@ def run(config: AppConfig) -> int:
                 rc_channel_pwm=None,
                 gate_text="dry-run",
             )
-            vehicle_state = None
+            vehicle_state = (
+                VehicleState(mode=config.mavlink.guided_nogps_mode_name)
+                if use_guided_nogps_follow
+                else None
+            )
             if mavlink is not None:
                 vehicle_state = mavlink.poll_state()
-                gate = mavlink.compute_follow_gate()
+                expected_mode_name = (
+                    config.mavlink.guided_nogps_mode_name
+                    if use_guided_nogps_follow
+                    else config.mavlink.guided_mode_name
+                )
+                gate = mavlink.compute_follow_gate(expected_mode_name=expected_mode_name)
                 if config.runtime.skip_rc_gate:
                     gate_snapshot = GateSnapshot(
                         follow_allowed=gate.guided_mode,
@@ -465,7 +551,7 @@ def run(config: AppConfig) -> int:
                         rc_channel_pwm=vehicle_state.rc_channel_pwm(
                             config.mavlink.follow_enable_channel
                         ),
-                        gate_text="rc gate bypassed",
+                        gate_text=f"rc gate bypassed mode={vehicle_state.mode}",
                     )
                 else:
                     gate_snapshot = GateSnapshot(
@@ -476,12 +562,13 @@ def run(config: AppConfig) -> int:
                             config.mavlink.follow_enable_channel
                         ),
                         gate_text=(
-                            f"mode_guided={gate.guided_mode} "
+                            f"mode_ok={gate.guided_mode} "
+                            f"mode={vehicle_state.mode} "
                             f"rc_high={gate.rc_switch_high}"
                         ),
                     )
 
-            if orbit_status.active and not gate_snapshot.follow_allowed:
+            if orbit_controller is not None and orbit_status.active and not gate_snapshot.follow_allowed:
                 orbit_controller.abort("orbit aborted: follow disabled")
                 orbit_status = orbit_controller.status
 
@@ -520,25 +607,43 @@ def run(config: AppConfig) -> int:
                             >= config.pose.trigger_cooldown_s
                         )
                     ):
-                        orbit_controller.start(loop_started_s)
-                        orbit_status = orbit_controller.status
-                        last_orbit_trigger_s = loop_started_s
-                        hand_raise_latched = True
-                        print("[orbit] triggered by raised right hand")
+                        if orbit_controller is not None:
+                            orbit_controller.start(loop_started_s)
+                            orbit_status = orbit_controller.status
+                            last_orbit_trigger_s = loop_started_s
+                            hand_raise_latched = True
+                            print("[orbit] triggered by raised right hand")
 
             control_started_s = time.monotonic()
-            orbit_command = orbit_controller.step(
-                observation,
-                loop_started_s,
-                follow_allowed=gate_snapshot.follow_allowed,
-            )
-            if orbit_command is not None:
-                controller.step(
+            orbit_command = None
+            if orbit_controller is not None:
+                orbit_command = orbit_controller.step(
                     observation,
                     loop_started_s,
-                    follow_allowed=False,
+                    follow_allowed=gate_snapshot.follow_allowed,
                 )
-                command = orbit_command
+            if orbit_command is not None:
+                if use_guided_nogps_follow:
+                    command = controller.step(
+                        observation,
+                        loop_started_s,
+                        follow_allowed=False,
+                        vehicle_state=vehicle_state,
+                    )
+                else:
+                    controller.step(
+                        observation,
+                        loop_started_s,
+                        follow_allowed=False,
+                    )
+                    command = orbit_command
+            elif use_guided_nogps_follow:
+                command = controller.step(
+                    observation,
+                    loop_started_s,
+                    follow_allowed=gate_snapshot.follow_allowed,
+                    vehicle_state=vehicle_state,
+                )
             else:
                 command = controller.step(
                     observation,
@@ -546,7 +651,8 @@ def run(config: AppConfig) -> int:
                     follow_allowed=gate_snapshot.follow_allowed,
                 )
             control_latency_s = time.monotonic() - control_started_s
-            orbit_status = orbit_controller.status
+            if orbit_controller is not None:
+                orbit_status = orbit_controller.status
 
             mavlink_started_s = time.monotonic()
             if mavlink is not None:
@@ -610,12 +716,10 @@ def run(config: AppConfig) -> int:
             if loop_started_s - last_log_s >= 1.0:
                 last_log_s = loop_started_s
                 print(
-                    f"[follow] active={command.active} reason={command.reason} "
+                    f"[follow] active={command.active} "
                     f"detections={len(detections)} tracks={len(tracks)} "
                     f"target={'yes' if observation else 'no'} "
-                    f"vx={command.velocity_forward_m_s:+.2f} "
-                    f"vy={command.velocity_right_m_s:+.2f} "
-                    f"yaw={command.yaw_rate_rad_s:+.2f} "
+                    f"{format_command_text(command)} "
                     f"gate={gate_snapshot.gate_text} "
                     f"orbit_active={orbit_status.active}"
                 )

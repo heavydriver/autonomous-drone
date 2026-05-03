@@ -31,6 +31,7 @@ class MavlinkConfig:
     baud_rate: int = 57600
     stream_rate_hz: int = 10
     guided_mode_name: str = "GUIDED"
+    guided_nogps_mode_name: str = "GUIDED_NOGPS"
     follow_enable_channel: int = 7
     follow_enable_high_pwm: int = 1800
 
@@ -122,6 +123,14 @@ class ControlConfig:
     yaw_slew_limit_deg_s2: float = 30.0
     vertical_slowdown_angle_deg: float = 18.0
     enable_lateral_motion: bool = False
+    guided_nogps_yaw_gain: float = 1.0
+    guided_nogps_pitch_gain: float = 0.20
+    guided_nogps_max_roll_deg: float = 0.0
+    guided_nogps_max_pitch_deg: float = 6.0
+    guided_nogps_max_yaw_step_deg: float = 12.0
+    guided_nogps_attitude_slew_limit_deg_s: float = 8.0
+    guided_nogps_yaw_slew_limit_deg_s: float = 12.0
+    guided_nogps_neutral_climb_rate_fraction: float = 0.5
 
 
 @dataclass(slots=True)
@@ -169,6 +178,7 @@ class RuntimeConfig:
 
     dry_run: bool = False
     skip_rc_gate: bool = False
+    enable_guided_nogps_follow: bool = False
     visualize: bool = False
     log_data: bool = False
     log_output_dir: str = "logs"

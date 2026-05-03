@@ -20,7 +20,11 @@ class ConfigLoadTest(unittest.TestCase):
             "camera": {"mount_pitch_deg": 12.5},
             "tracking": {"model_path": "/tmp/model.pt"},
             "pose": {"hand_raise_circle_enabled": True, "inference_interval_s": 6.0},
-            "runtime": {"skip_rc_gate": True, "video_source": "test-pipeline"},
+            "runtime": {
+                "skip_rc_gate": True,
+                "video_source": "test-pipeline",
+                "enable_guided_nogps_follow": True,
+            },
         }
         with tempfile.TemporaryDirectory() as tmpdir:
             config_path = Path(tmpdir) / "config.json"
@@ -33,6 +37,7 @@ class ConfigLoadTest(unittest.TestCase):
         self.assertTrue(config_dict["pose"]["hand_raise_circle_enabled"])
         self.assertEqual(config_dict["pose"]["inference_interval_s"], 6.0)
         self.assertTrue(config_dict["runtime"]["skip_rc_gate"])
+        self.assertTrue(config_dict["runtime"]["enable_guided_nogps_follow"])
         self.assertEqual(config_dict["runtime"]["video_source"], "test-pipeline")
 
     def test_mavlink_udp_transport_resolves_to_connection_string(self) -> None:

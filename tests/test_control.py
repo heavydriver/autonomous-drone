@@ -12,8 +12,12 @@ from autonomous_drone.config import (
     SafetyConfig,
     TrackingConfig,
 )
-from autonomous_drone.control import FollowController, OrbitController
-from autonomous_drone.models import BoundingBox, TargetObservation
+from autonomous_drone.control import (
+    FollowController,
+    GuidedNoGpsFollowController,
+    OrbitController,
+)
+from autonomous_drone.models import BoundingBox, TargetObservation, VehicleState
 
 
 class FollowControllerTest(unittest.TestCase):
@@ -242,6 +246,168 @@ class OrbitControllerTest(unittest.TestCase):
         self.assertIsNone(command)
         self.assertFalse(self.controller.status.active)
         self.assertIn("disabled", self.controller.status.reason)
+
+
+class GuidedNoGpsFollowControllerTest(unittest.TestCase):
+    """Validate conservative GUIDED_NOGPS attitude-follow behavior."""
+
+    def setUp(self) -> None:
+        self.camera = CameraConfig(
+            width=1280,
+            height=720,
+            horizontal_fov_deg=78.0,
+            vertical_fov_deg=49.0,
+        )
+        self.tracking = TrackingConfig(
+            detector_confidence=0.4,
+            min_box_area_ratio=0.01,
+            desired_box_area_ratio=0.08,
+            acquisition_confirm_frames=3,
+            loss_timeout_s=0.5,
+        )
+        self.control = ControlConfig(
+            loop_rate_hz=10.0,
+            yaw_deadband_deg=4.0,
+            box_area_deadband_ratio=0.012,
+            guided_nogps_pitch_gain=0.30,
+            guided_nogps_max_pitch_deg=6.0,
+            guided_nogps_max_yaw_step_deg=12.0,
+            guided_nogps_attitude_slew_limit_deg_s=8.0,
+            guided_nogps_yaw_slew_limit_deg_s=12.0,
+        )
+        self.controller = GuidedNoGpsFollowController(
+            self.camera,
+            self.tracking,
+            self.control,
+        )
+        self.vehicle_state = VehicleState(yaw_rad=0.0)
+
+    def _make_observation(
+        self,
+        center_x: float,
+        center_y: float,
+        width: float,
+        height: float,
+        track_id: int,
+        timestamp_s: float,
+    ) -> TargetObservation:
+        half_width = width * 0.5
+        half_height = height * 0.5
+        return TargetObservation(
+            track_id=track_id,
+            bbox=BoundingBox(
+                x1=center_x - half_width,
+                y1=center_y - half_height,
+                x2=center_x + half_width,
+                y2=center_y + half_height,
+            ),
+            confidence=0.9,
+            timestamp_s=timestamp_s,
+        )
+
+    def test_centered_target_holds_level_attitude(self) -> None:
+        """A centered target should converge to a near-level attitude command."""
+
+        box_area = (
+            self.camera.width
+            * self.camera.height
+            * self.tracking.desired_box_area_ratio
+        )
+        box_side = math.sqrt(box_area)
+        now_s = 0.0
+        for _ in range(4):
+            observation = self._make_observation(
+                center_x=self.camera.width * 0.5,
+                center_y=self.camera.height * 0.5,
+                width=box_side,
+                height=box_side,
+                track_id=1,
+                timestamp_s=now_s,
+            )
+            command = self.controller.step(
+                observation,
+                now_s,
+                follow_allowed=True,
+                vehicle_state=self.vehicle_state,
+            )
+            now_s += 0.1
+
+        self.assertEqual(command.command_type, "attitude")
+        self.assertTrue(command.active)
+        self.assertAlmostEqual(command.attitude_roll_rad or 0.0, 0.0, places=3)
+        self.assertAlmostEqual(command.attitude_pitch_rad or 0.0, 0.0, places=3)
+        self.assertAlmostEqual(command.attitude_yaw_rad or 0.0, 0.0, places=3)
+        self.assertAlmostEqual(command.climb_rate_fraction or 0.0, 0.5, places=3)
+
+    def test_off_center_target_commands_yaw_and_pitch(self) -> None:
+        """A small right-shifted target should bias yaw and pitch conservatively."""
+
+        box_area = self.camera.width * self.camera.height * 0.03
+        box_side = math.sqrt(box_area)
+        now_s = 0.0
+        command = None
+        for _ in range(4):
+            observation = self._make_observation(
+                center_x=self.camera.width * 0.72,
+                center_y=self.camera.height * 0.5,
+                width=box_side,
+                height=box_side,
+                track_id=1,
+                timestamp_s=now_s,
+            )
+            command = self.controller.step(
+                observation,
+                now_s,
+                follow_allowed=True,
+                vehicle_state=self.vehicle_state,
+            )
+            now_s += 0.1
+
+        assert command is not None
+        self.assertEqual(command.command_type, "attitude")
+        self.assertGreater(command.attitude_yaw_rad or 0.0, 0.0)
+        self.assertLess(command.attitude_pitch_rad or 0.0, 0.0)
+        self.assertLessEqual(
+            abs(command.attitude_pitch_rad or 0.0),
+            math.radians(self.control.guided_nogps_max_pitch_deg),
+        )
+
+    def test_target_loss_levels_the_vehicle(self) -> None:
+        """When the target is lost the controller should return toward level hold."""
+
+        box_area = self.camera.width * self.camera.height * 0.03
+        box_side = math.sqrt(box_area)
+        now_s = 0.0
+        for _ in range(4):
+            observation = self._make_observation(
+                center_x=self.camera.width * 0.72,
+                center_y=self.camera.height * 0.5,
+                width=box_side,
+                height=box_side,
+                track_id=1,
+                timestamp_s=now_s,
+            )
+            command = self.controller.step(
+                observation,
+                now_s,
+                follow_allowed=True,
+                vehicle_state=self.vehicle_state,
+            )
+            now_s += 0.1
+
+        lost_command = self.controller.step(
+            None,
+            now_s + 0.7,
+            follow_allowed=True,
+            vehicle_state=self.vehicle_state,
+        )
+        self.assertEqual(lost_command.command_type, "attitude")
+        self.assertFalse(lost_command.active)
+        self.assertLessEqual(
+            abs(lost_command.attitude_pitch_rad or 0.0),
+            abs(command.attitude_pitch_rad or 0.0),
+        )
+        self.assertIn("lost", lost_command.reason)
 
 
 if __name__ == "__main__":

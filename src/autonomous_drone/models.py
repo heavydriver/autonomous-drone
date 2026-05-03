@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Dict
+from typing import Dict, Literal
 
 
 @dataclass(frozen=True, slots=True)
@@ -99,7 +99,7 @@ class TargetObservation:
 
 @dataclass(frozen=True, slots=True)
 class FollowCommand:
-    """Velocity and yaw-rate command for the drone."""
+    """Generic follow command for either velocity or attitude control."""
 
     velocity_forward_m_s: float
     velocity_right_m_s: float
@@ -107,6 +107,11 @@ class FollowCommand:
     yaw_rate_rad_s: float
     active: bool
     reason: str
+    command_type: Literal["velocity_body", "attitude"] = "velocity_body"
+    attitude_roll_rad: float | None = None
+    attitude_pitch_rad: float | None = None
+    attitude_yaw_rad: float | None = None
+    climb_rate_fraction: float | None = None
 
     @classmethod
     def zero(cls, reason: str, active: bool = False) -> "FollowCommand":
@@ -119,6 +124,39 @@ class FollowCommand:
             yaw_rate_rad_s=0.0,
             active=active,
             reason=reason,
+        )
+
+    @classmethod
+    def neutral_attitude(
+        cls,
+        reason: str,
+        yaw_rad: float,
+        *,
+        active: bool = False,
+        climb_rate_fraction: float = 0.5,
+    ) -> "FollowCommand":
+        """Return a level attitude command with neutral climb rate.
+
+        Args:
+            reason: Human-readable reason for the command.
+            yaw_rad: Absolute yaw target in radians.
+            active: Whether the command represents active tracking.
+            climb_rate_fraction: ArduPilot climb-rate fraction where 0.5 is neutral
+                when ``GUID_OPTIONS = 0``.
+        """
+
+        return cls(
+            velocity_forward_m_s=0.0,
+            velocity_right_m_s=0.0,
+            velocity_down_m_s=0.0,
+            yaw_rate_rad_s=0.0,
+            active=active,
+            reason=reason,
+            command_type="attitude",
+            attitude_roll_rad=0.0,
+            attitude_pitch_rad=0.0,
+            attitude_yaw_rad=yaw_rad,
+            climb_rate_fraction=climb_rate_fraction,
         )
 
 

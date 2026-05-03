@@ -84,7 +84,7 @@ python -m autonomous_drone.app \
   --config ../configs/sitl_follow.local.json \
   --log-data \
   --skip-rc-gate \
-  --enable-hand-raise-circle \
+  --enable-guided-nogps-follow \
   --pose-model /absolute/path/to/yolo11n-pose.pt \
   --visualize
 ```

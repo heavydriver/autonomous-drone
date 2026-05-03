@@ -12,7 +12,7 @@ from autonomous_drone.config import (
     SafetyConfig,
     TrackingConfig,
 )
-from autonomous_drone.models import FollowCommand, TargetObservation
+from autonomous_drone.models import FollowCommand, TargetObservation, VehicleState
 
 
 @dataclass(frozen=True, slots=True)
@@ -55,6 +55,20 @@ def _rate_limit(current: float, target: float, max_delta: float) -> float:
     if target < current - max_delta:
         return current - max_delta
     return target
+
+
+def _wrap_angle_rad(angle_rad: float) -> float:
+    """Wrap an angle into ``[-pi, pi)``."""
+
+    return (angle_rad + math.pi) % (2.0 * math.pi) - math.pi
+
+
+def _rate_limit_angle(current: float, target: float, max_delta: float) -> float:
+    """Limit how quickly an angle target can change while respecting wraparound."""
+
+    delta = _wrap_angle_rad(target - current)
+    limited_delta = _clamp(delta, -max_delta, max_delta)
+    return _wrap_angle_rad(current + limited_delta)
 
 
 def compute_target_angles(
@@ -299,6 +313,276 @@ class FollowController:
         )
         self._last_command = limited
         return limited
+
+
+class GuidedNoGpsFollowController:
+    """Conservative image-based follower for ``GUIDED_NOGPS`` attitude control.
+
+    The controller intentionally avoids aggressive maneuvering: it commands a
+    level climb-rate hold, uses small pitch adjustments to close or open the
+    standoff distance, and applies small absolute yaw targets to keep the person
+    near the image center. Roll is held at or near zero by default.
+    """
+
+    def __init__(
+        self,
+        camera: CameraConfig,
+        tracking: TrackingConfig,
+        control: ControlConfig,
+    ) -> None:
+        """Initialize the ``GUIDED_NOGPS`` follow controller."""
+
+        self._camera = camera
+        self._tracking = tracking
+        self._control = control
+        self._filtered_horizontal_rad: float | None = None
+        self._filtered_area_ratio: float | None = None
+        self._last_update_s: float | None = None
+        self._last_seen_target_s: float | None = None
+        self._locked_track_id: int | None = None
+        self._confirmed_frames = 0
+        self._last_roll_rad = 0.0
+        self._last_pitch_rad = 0.0
+        self._last_yaw_rad: float | None = None
+
+    def compute_target_angles(self, observation: TargetObservation) -> TargetAngles:
+        """Convert a target box center into camera/body angular offsets."""
+
+        return compute_target_angles(self._camera, observation)
+
+    def step(
+        self,
+        observation: TargetObservation | None,
+        now_s: float,
+        follow_allowed: bool,
+        vehicle_state: VehicleState | None,
+    ) -> FollowCommand:
+        """Advance the controller by one frame.
+
+        Args:
+            observation: Currently selected target observation, or ``None``.
+            now_s: Monotonic timestamp in seconds.
+            follow_allowed: Whether external gating allows autonomous follow.
+            vehicle_state: Latest vehicle attitude used to anchor absolute yaw.
+        """
+
+        if vehicle_state is None:
+            return FollowCommand.zero("vehicle state unavailable")
+
+        dt = self._compute_dt(now_s)
+        current_yaw_rad = vehicle_state.yaw_rad
+
+        if not follow_allowed:
+            self._confirmed_frames = 0
+            return self._ramp_to_neutral(
+                dt,
+                current_yaw_rad=current_yaw_rad,
+                reason="follow disabled",
+            )
+
+        if observation is None:
+            return self._handle_missing_target(now_s, dt, current_yaw_rad)
+
+        area_ratio = observation.bbox.area_ratio(self._camera.width, self._camera.height)
+
+        if observation.track_id != self._locked_track_id:
+            self._locked_track_id = observation.track_id
+            self._confirmed_frames = 0
+            self._filtered_horizontal_rad = None
+            self._filtered_area_ratio = None
+
+        self._confirmed_frames += 1
+        self._last_seen_target_s = now_s
+
+        angles = self.compute_target_angles(observation)
+        self._filtered_horizontal_rad = _low_pass(
+            self._filtered_horizontal_rad,
+            angles.horizontal_rad,
+            self._control.horizontal_angle_filter_alpha,
+        )
+        self._filtered_area_ratio = _low_pass(
+            self._filtered_area_ratio,
+            area_ratio,
+            self._control.box_area_filter_alpha,
+        )
+
+        if self._confirmed_frames < self._tracking.acquisition_confirm_frames:
+            return self._ramp_to_neutral(
+                dt,
+                current_yaw_rad=current_yaw_rad,
+                reason="acquiring target",
+            )
+
+        return self._compute_tracking_command(
+            dt=dt,
+            current_yaw_rad=current_yaw_rad,
+            horizontal_rad=self._filtered_horizontal_rad,
+            area_ratio=self._filtered_area_ratio,
+        )
+
+    def _compute_dt(self, now_s: float) -> float:
+        """Compute a sane control-step delta time."""
+
+        if self._last_update_s is None:
+            self._last_update_s = now_s
+            return 1.0 / self._control.loop_rate_hz
+        dt = max(now_s - self._last_update_s, 1e-3)
+        self._last_update_s = now_s
+        return dt
+
+    def _handle_missing_target(
+        self,
+        now_s: float,
+        dt: float,
+        current_yaw_rad: float,
+        reason: str = "target missing",
+    ) -> FollowCommand:
+        """Handle target loss with a conservative ramp back to level attitude."""
+
+        if self._last_seen_target_s is None:
+            self._confirmed_frames = 0
+            return self._ramp_to_neutral(
+                dt,
+                current_yaw_rad=current_yaw_rad,
+                reason=reason,
+            )
+        if now_s - self._last_seen_target_s > self._tracking.loss_timeout_s:
+            self._confirmed_frames = 0
+            return self._ramp_to_neutral(
+                dt,
+                current_yaw_rad=current_yaw_rad,
+                reason="target lost",
+            )
+        return self._ramp_to_neutral(
+            dt,
+            current_yaw_rad=current_yaw_rad,
+            reason="target temporarily missing",
+        )
+
+    def _compute_tracking_command(
+        self,
+        *,
+        dt: float,
+        current_yaw_rad: float,
+        horizontal_rad: float,
+        area_ratio: float,
+    ) -> FollowCommand:
+        """Compute a conservative attitude command from image error."""
+
+        area_error = self._tracking.desired_box_area_ratio - area_ratio
+        desired_pitch_rad = 0.0
+        if abs(area_error) > self._control.box_area_deadband_ratio:
+            desired_pitch_rad = -self._control.guided_nogps_pitch_gain * area_error
+        if area_ratio >= self._tracking.emergency_stop_area_ratio:
+            desired_pitch_rad = max(desired_pitch_rad, 0.0)
+
+        desired_pitch_rad = _clamp(
+            desired_pitch_rad,
+            -math.radians(self._control.guided_nogps_max_pitch_deg),
+            math.radians(self._control.guided_nogps_max_pitch_deg),
+        )
+        max_attitude_delta = (
+            math.radians(self._control.guided_nogps_attitude_slew_limit_deg_s) * dt
+        )
+        limited_pitch_rad = _rate_limit(
+            self._last_pitch_rad,
+            desired_pitch_rad,
+            max_attitude_delta,
+        )
+
+        desired_roll_rad = 0.0
+        desired_roll_rad = _clamp(
+            desired_roll_rad,
+            -math.radians(self._control.guided_nogps_max_roll_deg),
+            math.radians(self._control.guided_nogps_max_roll_deg),
+        )
+        limited_roll_rad = _rate_limit(
+            self._last_roll_rad,
+            desired_roll_rad,
+            max_attitude_delta,
+        )
+
+        yaw_deadband_rad = math.radians(self._control.yaw_deadband_deg)
+        yaw_offset_rad = 0.0
+        if abs(horizontal_rad) > yaw_deadband_rad:
+            yaw_offset_rad = self._control.guided_nogps_yaw_gain * horizontal_rad
+        yaw_offset_rad = _clamp(
+            yaw_offset_rad,
+            -math.radians(self._control.guided_nogps_max_yaw_step_deg),
+            math.radians(self._control.guided_nogps_max_yaw_step_deg),
+        )
+        desired_yaw_rad = _wrap_angle_rad(current_yaw_rad + yaw_offset_rad)
+        yaw_reference_rad = (
+            current_yaw_rad if self._last_yaw_rad is None else self._last_yaw_rad
+        )
+        max_yaw_delta = math.radians(self._control.guided_nogps_yaw_slew_limit_deg_s) * dt
+        limited_yaw_rad = _rate_limit_angle(
+            yaw_reference_rad,
+            desired_yaw_rad,
+            max_yaw_delta,
+        )
+
+        self._last_roll_rad = limited_roll_rad
+        self._last_pitch_rad = limited_pitch_rad
+        self._last_yaw_rad = limited_yaw_rad
+        reason = "tracking target (guided_nogps)"
+        if area_ratio < self._tracking.min_box_area_ratio:
+            reason = "tracking small target (guided_nogps)"
+
+        return FollowCommand(
+            velocity_forward_m_s=0.0,
+            velocity_right_m_s=0.0,
+            velocity_down_m_s=0.0,
+            yaw_rate_rad_s=0.0,
+            active=True,
+            reason=reason,
+            command_type="attitude",
+            attitude_roll_rad=limited_roll_rad,
+            attitude_pitch_rad=limited_pitch_rad,
+            attitude_yaw_rad=limited_yaw_rad,
+            climb_rate_fraction=self._control.guided_nogps_neutral_climb_rate_fraction,
+        )
+
+    def _ramp_to_neutral(
+        self,
+        dt: float,
+        *,
+        current_yaw_rad: float,
+        reason: str,
+    ) -> FollowCommand:
+        """Return a level-attitude command reached through conservative slew limits."""
+
+        max_attitude_delta = (
+            math.radians(self._control.guided_nogps_attitude_slew_limit_deg_s) * dt
+        )
+        self._last_roll_rad = _rate_limit(self._last_roll_rad, 0.0, max_attitude_delta)
+        self._last_pitch_rad = _rate_limit(
+            self._last_pitch_rad,
+            0.0,
+            max_attitude_delta,
+        )
+        yaw_reference_rad = (
+            current_yaw_rad if self._last_yaw_rad is None else self._last_yaw_rad
+        )
+        max_yaw_delta = math.radians(self._control.guided_nogps_yaw_slew_limit_deg_s) * dt
+        self._last_yaw_rad = _rate_limit_angle(
+            yaw_reference_rad,
+            current_yaw_rad,
+            max_yaw_delta,
+        )
+        return FollowCommand(
+            velocity_forward_m_s=0.0,
+            velocity_right_m_s=0.0,
+            velocity_down_m_s=0.0,
+            yaw_rate_rad_s=0.0,
+            active=False,
+            reason=reason,
+            command_type="attitude",
+            attitude_roll_rad=self._last_roll_rad,
+            attitude_pitch_rad=self._last_pitch_rad,
+            attitude_yaw_rad=self._last_yaw_rad,
+            climb_rate_fraction=self._control.guided_nogps_neutral_climb_rate_fraction,
+        )
 
 
 class OrbitController:

@@ -1,7 +1,8 @@
-"""pymavlink integration for ArduPilot Guided-mode control."""
+"""pymavlink integration for ArduPilot Guided and Guided_NoGPS control."""
 
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass
 from time import monotonic
 
@@ -24,9 +25,10 @@ class FollowGate:
 
 
 class MavlinkFollowerClient:
-    """Minimal MAVLink client for conservative Guided-mode follow control."""
+    """Minimal MAVLink client for conservative follow control."""
 
     _VELOCITY_YAWRATE_TYPE_MASK = 1479
+    _ATTITUDE_IGNORE_BODY_RATES_MASK = 0x07
 
     def __init__(self, config: MavlinkConfig) -> None:
         """Create a MAVLink client.
@@ -52,6 +54,7 @@ class MavlinkFollowerClient:
         )
         self._state = VehicleState()
         self._sent_nonzero_command = False
+        self._last_command_type = "velocity_body"
 
     def connect(self, timeout_s: float = 30.0) -> None:
         """Wait for heartbeat and request telemetry streams."""
@@ -87,17 +90,45 @@ class MavlinkFollowerClient:
                 self._state.yaw_rad = float(message.yaw)
         return self._state
 
-    def compute_follow_gate(self) -> FollowGate:
+    def compute_follow_gate(self, expected_mode_name: str | None = None) -> FollowGate:
         """Compute whether follow autonomy is allowed from mode and RC state."""
 
         state = self._state
         rc_value = state.rc_channel_pwm(self._config.follow_enable_channel)
+        mode_name = expected_mode_name or self._config.guided_mode_name
         return FollowGate(
-            guided_mode=state.mode.upper() == self._config.guided_mode_name.upper(),
-            rc_switch_high=(rc_value is not None and rc_value >= self._config.follow_enable_high_pwm),
+            guided_mode=state.mode.upper() == mode_name.upper(),
+            rc_switch_high=(
+                rc_value is not None
+                and rc_value >= self._config.follow_enable_high_pwm
+            ),
         )
 
     def send_follow_command(self, command: FollowCommand) -> None:
+        """Send the requested follow command using the matching MAVLink primitive."""
+
+        if command.command_type == "attitude":
+            self._send_attitude_command(command)
+            return
+        self._send_velocity_command(command)
+
+    def send_zero_once(self, reason: str = "stopping autonomy") -> None:
+        """Send a single neutral command if the client was previously moving the drone."""
+
+        if not self._sent_nonzero_command:
+            return
+        if self._last_command_type == "attitude":
+            self.send_follow_command(
+                FollowCommand.neutral_attitude(
+                    reason=reason,
+                    yaw_rad=self._state.yaw_rad,
+                )
+            )
+        else:
+            self.send_follow_command(FollowCommand.zero(reason=reason))
+        self._sent_nonzero_command = False
+
+    def _send_velocity_command(self, command: FollowCommand) -> None:
         """Send a body-frame velocity command with yaw rate in Guided mode."""
 
         self._master.mav.set_position_target_local_ned_send(
@@ -118,6 +149,7 @@ class MavlinkFollowerClient:
             0.0,
             command.yaw_rate_rad_s,
         )
+        self._last_command_type = "velocity_body"
         self._sent_nonzero_command = any(
             abs(value) > 1e-6
             for value in (
@@ -128,13 +160,39 @@ class MavlinkFollowerClient:
             )
         )
 
-    def send_zero_once(self, reason: str = "stopping autonomy") -> None:
-        """Send a single zero command if the client was previously moving the drone."""
+    def _send_attitude_command(self, command: FollowCommand) -> None:
+        """Send an absolute attitude target for ``GUIDED_NOGPS`` follow."""
 
-        if not self._sent_nonzero_command:
-            return
-        self.send_follow_command(FollowCommand.zero(reason=reason))
-        self._sent_nonzero_command = False
+        if (
+            command.attitude_roll_rad is None
+            or command.attitude_pitch_rad is None
+            or command.attitude_yaw_rad is None
+            or command.climb_rate_fraction is None
+        ):
+            raise ValueError("Attitude follow command is missing attitude fields")
+
+        self._master.mav.set_attitude_target_send(
+            0,
+            self._master.target_system,
+            self._master.target_component,
+            self._ATTITUDE_IGNORE_BODY_RATES_MASK,
+            _euler_to_quaternion(
+                command.attitude_roll_rad,
+                command.attitude_pitch_rad,
+                command.attitude_yaw_rad,
+            ),
+            0.0,
+            0.0,
+            0.0,
+            _clamp_fraction(command.climb_rate_fraction),
+        )
+        self._last_command_type = "attitude"
+        self._sent_nonzero_command = (
+            abs(command.attitude_roll_rad) > 1e-6
+            or abs(command.attitude_pitch_rad) > 1e-6
+            or abs(_wrap_angle(command.attitude_yaw_rad - self._state.yaw_rad)) > 1e-3
+            or abs(command.climb_rate_fraction - 0.5) > 1e-6
+        )
 
     def _request_streams(self) -> None:
         """Request telemetry streams from the autopilot."""
@@ -146,3 +204,39 @@ class MavlinkFollowerClient:
             self._config.stream_rate_hz,
             1,
         )
+
+
+def _euler_to_quaternion(
+    roll_rad: float,
+    pitch_rad: float,
+    yaw_rad: float,
+) -> tuple[float, float, float, float]:
+    """Convert roll, pitch, yaw Euler angles into a MAVLink quaternion."""
+
+    half_roll = roll_rad * 0.5
+    half_pitch = pitch_rad * 0.5
+    half_yaw = yaw_rad * 0.5
+    cr = math.cos(half_roll)
+    sr = math.sin(half_roll)
+    cp = math.cos(half_pitch)
+    sp = math.sin(half_pitch)
+    cy = math.cos(half_yaw)
+    sy = math.sin(half_yaw)
+    return (
+        cr * cp * cy + sr * sp * sy,
+        sr * cp * cy - cr * sp * sy,
+        cr * sp * cy + sr * cp * sy,
+        cr * cp * sy - sr * sp * cy,
+    )
+
+
+def _wrap_angle(angle_rad: float) -> float:
+    """Wrap an angle into ``[-pi, pi)``."""
+
+    return (angle_rad + math.pi) % (2.0 * math.pi) - math.pi
+
+
+def _clamp_fraction(value: float) -> float:
+    """Clamp a climb-rate or thrust fraction into the MAVLink-supported range."""
+
+    return max(0.0, min(1.0, value))

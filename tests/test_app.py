@@ -120,6 +120,15 @@ class AppCliConfigTest(unittest.TestCase):
         self.assertEqual(config.pose.model_path, "/tmp/yolo11n-pose.pt")
         self.assertEqual(config.pose.inference_interval_s, 6.5)
 
+    def test_guided_nogps_flag_enables_attitude_follow_mode(self) -> None:
+        """The CLI flag should opt in to the GUIDED_NOGPS follow path."""
+
+        args = parse_args(["--enable-guided-nogps-follow"])
+
+        config = build_config(args)
+
+        self.assertTrue(config.runtime.enable_guided_nogps_follow)
+
 
 class _FakeFrame:
     """Minimal frame object exposing the shape OpenCV code expects."""
