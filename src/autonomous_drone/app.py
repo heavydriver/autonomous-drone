@@ -396,7 +396,10 @@ def run(config: AppConfig) -> int:
             config.control,
         )
         orbit_controller = None
-        print("[follow] using GUIDED_NOGPS attitude follower")
+        print(
+            "[follow] using no-GPS attitude follower "
+            f"(mode={config.mavlink.guided_nogps_mode_name})"
+        )
     else:
         controller = FollowController(config.camera, config.tracking, config.control)
         orbit_controller = OrbitController(
@@ -421,7 +424,10 @@ def run(config: AppConfig) -> int:
             config.pose, device=config.runtime.model_device
         )
     elif config.pose.hand_raise_circle_enabled and not orbit_supported:
-        print("[pose] hand-raise orbit trigger disabled in GUIDED_NOGPS follow mode")
+        print(
+            "[pose] hand-raise orbit trigger disabled in no-GPS follow mode "
+            f"(mode={config.mavlink.guided_nogps_mode_name})"
+        )
 
     mavlink = None
     if not config.runtime.dry_run:
@@ -519,7 +525,10 @@ def run(config: AppConfig) -> int:
                 else OrbitStatus(
                     active=False,
                     progress_rad=0.0,
-                    reason="orbit unsupported in GUIDED_NOGPS follow mode",
+                    reason=(
+                        "orbit unsupported in no-GPS follow mode "
+                        f"({config.mavlink.guided_nogps_mode_name})"
+                    ),
                 )
             )
 

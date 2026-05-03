@@ -31,7 +31,7 @@ class MavlinkConfig:
     baud_rate: int = 57600
     stream_rate_hz: int = 10
     guided_mode_name: str = "GUIDED"
-    guided_nogps_mode_name: str = "GUIDED_NOGPS"
+    guided_nogps_mode_name: str = "ALT_HOLD"
     follow_enable_channel: int = 7
     follow_enable_high_pwm: int = 1800
 

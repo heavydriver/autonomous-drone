@@ -60,6 +60,13 @@ class ConfigLoadTest(unittest.TestCase):
         self.assertEqual(config.resolved_connection_string(), "/dev/ttyUSB0")
         self.assertEqual(config.describe_endpoint(), "serial:/dev/ttyUSB0@921600")
 
+    def test_default_nogps_follow_mode_uses_alt_hold(self) -> None:
+        """The no-GPS follower should expect ALT_HOLD unless overridden."""
+
+        config = MavlinkConfig()
+
+        self.assertEqual(config.guided_nogps_mode_name, "ALT_HOLD")
+
     def test_raw_connection_string_override_wins(self) -> None:
         """A raw pymavlink connection string should bypass transport synthesis."""
 
