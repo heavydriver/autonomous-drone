@@ -187,10 +187,8 @@ def format_command_text(command) -> str:
         )
         return (
             "att "
-            f"roll={roll_deg:+.1f}deg "
             f"pitch={pitch_deg:+.1f}deg "
             f"yaw={yaw_deg:+.1f}deg "
-            f"climb={climb:.2f} "
             f"reason={command.reason}"
         )
 
@@ -255,19 +253,19 @@ def draw_overlay(
             (0, 255, 0),
             2,
         )
-    cv2.putText(
-        frame,
-        f"follow_allowed={follow_allowed} {gate_text}",
-        (10, 24),
-        cv2.FONT_HERSHEY_SIMPLEX,
-        0.6,
-        (0, 255, 255),
-        2,
-    )
+    # cv2.putText(
+    #     frame,
+    #     f"follow_allowed={follow_allowed} {gate_text}",
+    #     (10, 24),
+    #     cv2.FONT_HERSHEY_SIMPLEX,
+    #     0.6,
+    #     (0, 255, 255),
+    #     2,
+    # )
     cv2.putText(
         frame,
         format_command_text(command),
-        (10, 50),
+        (10, 24),
         cv2.FONT_HERSHEY_SIMPLEX,
         0.55,
         (255, 255, 0),
@@ -276,7 +274,7 @@ def draw_overlay(
     cv2.putText(
         frame,
         f"detections={detection_count} tracks={track_count}",
-        (10, 76),
+        (10, 50),
         cv2.FONT_HERSHEY_SIMPLEX,
         0.55,
         (200, 255, 200),
@@ -286,30 +284,30 @@ def draw_overlay(
     cv2.putText(
         frame,
         f"area_ratio={area_ratio_text}",
-        (10, 102),
+        (10, 76),
         cv2.FONT_HERSHEY_SIMPLEX,
         0.55,
         (200, 220, 255),
         2,
     )
-    cv2.putText(
-        frame,
-        pose_status_text,
-        (10, 128),
-        cv2.FONT_HERSHEY_SIMPLEX,
-        0.55,
-        (180, 220, 255),
-        2,
-    )
-    cv2.putText(
-        frame,
-        orbit_status_text,
-        (10, 154),
-        cv2.FONT_HERSHEY_SIMPLEX,
-        0.55,
-        (150, 255, 150),
-        2,
-    )
+    # cv2.putText(
+    #     frame,
+    #     pose_status_text,
+    #     (10, 128),
+    #     cv2.FONT_HERSHEY_SIMPLEX,
+    #     0.55,
+    #     (180, 220, 255),
+    #     2,
+    # )
+    # cv2.putText(
+    #     frame,
+    #     orbit_status_text,
+    #     (10, 154),
+    #     cv2.FONT_HERSHEY_SIMPLEX,
+    #     0.55,
+    #     (150, 255, 150),
+    #     2,
+    # )
 
 
 class AnnotatedClipRecorder:
