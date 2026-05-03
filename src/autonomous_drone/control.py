@@ -315,13 +315,13 @@ class FollowController:
         return limited
 
 
-class GuidedNoGpsFollowController:
-    """Conservative image-based follower for ``GUIDED_NOGPS`` attitude control.
+class AltHoldFollowController:
+    """Conservative image-based follower for ``ALT_HOLD`` stick control.
 
-    The controller intentionally avoids aggressive maneuvering: it commands a
-    level climb-rate hold, uses small pitch adjustments to close or open the
-    standoff distance, and applies small absolute yaw targets to keep the person
-    near the image center. Roll is held at or near zero by default.
+    The controller behaves like a careful pilot: it requests bounded pitch and
+    yaw stick inputs to adjust stand-off distance and keep the selected person
+    centered. Throttle stays near neutral so ``ALT_HOLD`` remains responsible
+    for holding altitude.
     """
 
     def __init__(
@@ -330,7 +330,7 @@ class GuidedNoGpsFollowController:
         tracking: TrackingConfig,
         control: ControlConfig,
     ) -> None:
-        """Initialize the ``GUIDED_NOGPS`` follow controller."""
+        """Initialize the ``ALT_HOLD`` follow controller."""
 
         self._camera = camera
         self._tracking = tracking
@@ -341,9 +341,9 @@ class GuidedNoGpsFollowController:
         self._last_seen_target_s: float | None = None
         self._locked_track_id: int | None = None
         self._confirmed_frames = 0
-        self._last_roll_rad = 0.0
-        self._last_pitch_rad = 0.0
-        self._last_yaw_rad: float | None = None
+        self._last_roll_stick = 0.0
+        self._last_pitch_stick = 0.0
+        self._last_yaw_stick = 0.0
 
     def compute_target_angles(self, observation: TargetObservation) -> TargetAngles:
         """Convert a target box center into camera/body angular offsets."""
@@ -355,7 +355,7 @@ class GuidedNoGpsFollowController:
         observation: TargetObservation | None,
         now_s: float,
         follow_allowed: bool,
-        vehicle_state: VehicleState | None,
+        vehicle_state: VehicleState | None = None,
     ) -> FollowCommand:
         """Advance the controller by one frame.
 
@@ -363,25 +363,17 @@ class GuidedNoGpsFollowController:
             observation: Currently selected target observation, or ``None``.
             now_s: Monotonic timestamp in seconds.
             follow_allowed: Whether external gating allows autonomous follow.
-            vehicle_state: Latest vehicle attitude used to anchor absolute yaw.
+            vehicle_state: Unused placeholder kept for call-site compatibility.
         """
 
-        if vehicle_state is None:
-            return FollowCommand.zero("vehicle state unavailable")
-
         dt = self._compute_dt(now_s)
-        current_yaw_rad = vehicle_state.yaw_rad
 
         if not follow_allowed:
             self._confirmed_frames = 0
-            return self._ramp_to_neutral(
-                dt,
-                current_yaw_rad=current_yaw_rad,
-                reason="follow disabled",
-            )
+            return self._ramp_to_neutral(dt, reason="follow disabled")
 
         if observation is None:
-            return self._handle_missing_target(now_s, dt, current_yaw_rad)
+            return self._handle_missing_target(now_s, dt)
 
         area_ratio = observation.bbox.area_ratio(self._camera.width, self._camera.height)
 
@@ -407,15 +399,10 @@ class GuidedNoGpsFollowController:
         )
 
         if self._confirmed_frames < self._tracking.acquisition_confirm_frames:
-            return self._ramp_to_neutral(
-                dt,
-                current_yaw_rad=current_yaw_rad,
-                reason="acquiring target",
-            )
+            return self._ramp_to_neutral(dt, reason="acquiring target")
 
         return self._compute_tracking_command(
             dt=dt,
-            current_yaw_rad=current_yaw_rad,
             horizontal_rad=self._filtered_horizontal_rad,
             area_ratio=self._filtered_area_ratio,
         )
@@ -434,100 +421,87 @@ class GuidedNoGpsFollowController:
         self,
         now_s: float,
         dt: float,
-        current_yaw_rad: float,
         reason: str = "target missing",
     ) -> FollowCommand:
-        """Handle target loss with a conservative ramp back to level attitude."""
+        """Handle target loss with a conservative ramp back to neutral sticks."""
 
         if self._last_seen_target_s is None:
             self._confirmed_frames = 0
-            return self._ramp_to_neutral(
-                dt,
-                current_yaw_rad=current_yaw_rad,
-                reason=reason,
-            )
+            return self._ramp_to_neutral(dt, reason=reason)
         if now_s - self._last_seen_target_s > self._tracking.loss_timeout_s:
             self._confirmed_frames = 0
-            return self._ramp_to_neutral(
-                dt,
-                current_yaw_rad=current_yaw_rad,
-                reason="target lost",
-            )
-        return self._ramp_to_neutral(
-            dt,
-            current_yaw_rad=current_yaw_rad,
-            reason="target temporarily missing",
-        )
+            return self._ramp_to_neutral(dt, reason="target lost")
+        return self._ramp_to_neutral(dt, reason="target temporarily missing")
 
     def _compute_tracking_command(
         self,
         *,
         dt: float,
-        current_yaw_rad: float,
         horizontal_rad: float,
         area_ratio: float,
     ) -> FollowCommand:
-        """Compute a conservative attitude command from image error."""
+        """Compute conservative ``ALT_HOLD`` stick inputs from image error."""
 
         area_error = self._tracking.desired_box_area_ratio - area_ratio
-        desired_pitch_rad = 0.0
+        desired_pitch_stick = 0.0
         if abs(area_error) > self._control.box_area_deadband_ratio:
-            desired_pitch_rad = -self._control.guided_nogps_pitch_gain * area_error
+            desired_pitch_stick = self._control.alt_hold_pitch_gain * area_error
         if area_ratio >= self._tracking.emergency_stop_area_ratio:
-            desired_pitch_rad = max(desired_pitch_rad, 0.0)
+            desired_pitch_stick = min(desired_pitch_stick, 0.0)
 
-        desired_pitch_rad = _clamp(
-            desired_pitch_rad,
-            -math.radians(self._control.guided_nogps_max_pitch_deg),
-            math.radians(self._control.guided_nogps_max_pitch_deg),
+        desired_pitch_stick = _clamp(
+            desired_pitch_stick,
+            -self._control.alt_hold_max_pitch_stick,
+            self._control.alt_hold_max_pitch_stick,
         )
-        max_attitude_delta = (
-            math.radians(self._control.guided_nogps_attitude_slew_limit_deg_s) * dt
+        max_stick_delta = (
+            self._control.alt_hold_stick_slew_rate_per_s * dt
         )
-        limited_pitch_rad = _rate_limit(
-            self._last_pitch_rad,
-            desired_pitch_rad,
-            max_attitude_delta,
-        )
-
-        desired_roll_rad = 0.0
-        desired_roll_rad = _clamp(
-            desired_roll_rad,
-            -math.radians(self._control.guided_nogps_max_roll_deg),
-            math.radians(self._control.guided_nogps_max_roll_deg),
-        )
-        limited_roll_rad = _rate_limit(
-            self._last_roll_rad,
-            desired_roll_rad,
-            max_attitude_delta,
+        limited_pitch_stick = _rate_limit(
+            self._last_pitch_stick,
+            desired_pitch_stick,
+            max_stick_delta,
         )
 
         yaw_deadband_rad = math.radians(self._control.yaw_deadband_deg)
-        yaw_offset_rad = 0.0
+        desired_yaw_stick = 0.0
         if abs(horizontal_rad) > yaw_deadband_rad:
-            yaw_offset_rad = self._control.guided_nogps_yaw_gain * horizontal_rad
-        yaw_offset_rad = _clamp(
-            yaw_offset_rad,
-            -math.radians(self._control.guided_nogps_max_yaw_step_deg),
-            math.radians(self._control.guided_nogps_max_yaw_step_deg),
+            desired_yaw_stick = self._control.alt_hold_yaw_gain * horizontal_rad
+        desired_yaw_stick = _clamp(
+            desired_yaw_stick,
+            -self._control.alt_hold_max_yaw_stick,
+            self._control.alt_hold_max_yaw_stick,
         )
-        desired_yaw_rad = _wrap_angle_rad(current_yaw_rad + yaw_offset_rad)
-        yaw_reference_rad = (
-            current_yaw_rad if self._last_yaw_rad is None else self._last_yaw_rad
-        )
-        max_yaw_delta = math.radians(self._control.guided_nogps_yaw_slew_limit_deg_s) * dt
-        limited_yaw_rad = _rate_limit_angle(
-            yaw_reference_rad,
-            desired_yaw_rad,
-            max_yaw_delta,
+        limited_yaw_stick = _rate_limit(
+            self._last_yaw_stick,
+            desired_yaw_stick,
+            max_stick_delta,
         )
 
-        self._last_roll_rad = limited_roll_rad
-        self._last_pitch_rad = limited_pitch_rad
-        self._last_yaw_rad = limited_yaw_rad
-        reason = "tracking target (guided_nogps)"
+        desired_roll_stick = 0.0
+        if self._control.enable_lateral_motion:
+            alignment_window_rad = math.radians(
+                self._control.horizontal_alignment_window_deg
+            )
+            if abs(horizontal_rad) <= alignment_window_rad:
+                desired_roll_stick = self._control.alt_hold_roll_gain * horizontal_rad
+        desired_roll_stick = _clamp(
+            desired_roll_stick,
+            -self._control.alt_hold_max_roll_stick,
+            self._control.alt_hold_max_roll_stick,
+        )
+        limited_roll_stick = _rate_limit(
+            self._last_roll_stick,
+            desired_roll_stick,
+            max_stick_delta,
+        )
+
+        self._last_roll_stick = limited_roll_stick
+        self._last_pitch_stick = limited_pitch_stick
+        self._last_yaw_stick = limited_yaw_stick
+        reason = "tracking target (alt_hold)"
         if area_ratio < self._tracking.min_box_area_ratio:
-            reason = "tracking small target (guided_nogps)"
+            reason = "tracking small target (alt_hold)"
 
         return FollowCommand(
             velocity_forward_m_s=0.0,
@@ -536,39 +510,35 @@ class GuidedNoGpsFollowController:
             yaw_rate_rad_s=0.0,
             active=True,
             reason=reason,
-            command_type="attitude",
-            attitude_roll_rad=limited_roll_rad,
-            attitude_pitch_rad=limited_pitch_rad,
-            attitude_yaw_rad=limited_yaw_rad,
-            climb_rate_fraction=self._control.guided_nogps_neutral_climb_rate_fraction,
+            command_type="manual_control",
+            manual_pitch=limited_pitch_stick,
+            manual_roll=limited_roll_stick,
+            manual_throttle=self._control.alt_hold_neutral_throttle,
+            manual_yaw=limited_yaw_stick,
         )
 
     def _ramp_to_neutral(
         self,
         dt: float,
-        *,
-        current_yaw_rad: float,
         reason: str,
     ) -> FollowCommand:
-        """Return a level-attitude command reached through conservative slew limits."""
+        """Return neutral sticks reached through conservative slew limits."""
 
-        max_attitude_delta = (
-            math.radians(self._control.guided_nogps_attitude_slew_limit_deg_s) * dt
-        )
-        self._last_roll_rad = _rate_limit(self._last_roll_rad, 0.0, max_attitude_delta)
-        self._last_pitch_rad = _rate_limit(
-            self._last_pitch_rad,
+        max_stick_delta = self._control.alt_hold_stick_slew_rate_per_s * dt
+        self._last_roll_stick = _rate_limit(
+            self._last_roll_stick,
             0.0,
-            max_attitude_delta,
+            max_stick_delta,
         )
-        yaw_reference_rad = (
-            current_yaw_rad if self._last_yaw_rad is None else self._last_yaw_rad
+        self._last_pitch_stick = _rate_limit(
+            self._last_pitch_stick,
+            0.0,
+            max_stick_delta,
         )
-        max_yaw_delta = math.radians(self._control.guided_nogps_yaw_slew_limit_deg_s) * dt
-        self._last_yaw_rad = _rate_limit_angle(
-            yaw_reference_rad,
-            current_yaw_rad,
-            max_yaw_delta,
+        self._last_yaw_stick = _rate_limit(
+            self._last_yaw_stick,
+            0.0,
+            max_stick_delta,
         )
         return FollowCommand(
             velocity_forward_m_s=0.0,
@@ -577,11 +547,11 @@ class GuidedNoGpsFollowController:
             yaw_rate_rad_s=0.0,
             active=False,
             reason=reason,
-            command_type="attitude",
-            attitude_roll_rad=self._last_roll_rad,
-            attitude_pitch_rad=self._last_pitch_rad,
-            attitude_yaw_rad=self._last_yaw_rad,
-            climb_rate_fraction=self._control.guided_nogps_neutral_climb_rate_fraction,
+            command_type="manual_control",
+            manual_pitch=self._last_pitch_stick,
+            manual_roll=self._last_roll_stick,
+            manual_throttle=self._control.alt_hold_neutral_throttle,
+            manual_yaw=self._last_yaw_stick,
         )
 
 

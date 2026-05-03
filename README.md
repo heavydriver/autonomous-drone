@@ -2,7 +2,7 @@
 
 ## Overview
 
-This project detects a person in the camera feed, keeps that person selected across frames, and sends MAVLink follow commands to an ArduPilot-based drone in `GUIDED` mode.
+This project detects a person in the camera feed, keeps that person selected across frames, and sends MAVLink follow commands to an ArduPilot-based drone in `GUIDED` mode or conservative stick inputs in `ALT_HOLD`.
 
 The pipeline is:
 
@@ -70,6 +70,7 @@ Useful flags:
 - `--transport serial --serial-device /dev/ttyUSB0 --baud 921600` selects a UART-connected flight controller
 - `--skip-rc-gate` lets you test in `GUIDED` mode without needing the RC switch in SITL
 - `--dry-run` runs detection, tracking, and control without sending MAVLink commands
+- `--enable-guided-nogps-follow` enables the no-GPS `ALT_HOLD` stick-control path
 - `--enable-hand-raise-circle` enables the optional pose-triggered one-shot orbit behavior
 - `--pose-model /path/to/yolo11n-pose.pt` points the gesture feature at YOLO pose weights
 - `--visualize` shows the detection box, target ID, `area_ratio`, and command overlay

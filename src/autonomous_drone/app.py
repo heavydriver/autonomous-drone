@@ -11,8 +11,8 @@ from pathlib import Path
 
 from autonomous_drone.config import AppConfig, config_to_dict, load_config_file
 from autonomous_drone.control import (
+    AltHoldFollowController,
     FollowController,
-    GuidedNoGpsFollowController,
     OrbitStatus,
     OrbitController,
 )
@@ -191,6 +191,20 @@ def format_command_text(command) -> str:
             f"pitch={pitch_deg:+.1f}deg "
             f"yaw={yaw_deg:+.1f}deg "
             f"climb={climb:.2f} "
+            f"reason={command.reason}"
+        )
+
+    if command.command_type == "manual_control":
+        pitch = 0.0 if command.manual_pitch is None else command.manual_pitch
+        roll = 0.0 if command.manual_roll is None else command.manual_roll
+        throttle = 0.5 if command.manual_throttle is None else command.manual_throttle
+        yaw = 0.0 if command.manual_yaw is None else command.manual_yaw
+        return (
+            "mctl "
+            f"pitch={pitch:+.2f} "
+            f"roll={roll:+.2f} "
+            f"thr={throttle:.2f} "
+            f"yaw={yaw:+.2f} "
             f"reason={command.reason}"
         )
 
@@ -390,14 +404,14 @@ def run(config: AppConfig) -> int:
 
     use_guided_nogps_follow = config.runtime.enable_guided_nogps_follow
     if use_guided_nogps_follow:
-        controller = GuidedNoGpsFollowController(
+        controller = AltHoldFollowController(
             config.camera,
             config.tracking,
             config.control,
         )
         orbit_controller = None
         print(
-            "[follow] using no-GPS attitude follower "
+            "[follow] using no-GPS ALT_HOLD stick follower "
             f"(mode={config.mavlink.guided_nogps_mode_name})"
         )
     else:

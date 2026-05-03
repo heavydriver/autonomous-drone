@@ -107,11 +107,15 @@ class FollowCommand:
     yaw_rate_rad_s: float
     active: bool
     reason: str
-    command_type: Literal["velocity_body", "attitude"] = "velocity_body"
+    command_type: Literal["velocity_body", "attitude", "manual_control"] = "velocity_body"
     attitude_roll_rad: float | None = None
     attitude_pitch_rad: float | None = None
     attitude_yaw_rad: float | None = None
     climb_rate_fraction: float | None = None
+    manual_pitch: float | None = None
+    manual_roll: float | None = None
+    manual_throttle: float | None = None
+    manual_yaw: float | None = None
 
     @classmethod
     def zero(cls, reason: str, active: bool = False) -> "FollowCommand":
@@ -157,6 +161,37 @@ class FollowCommand:
             attitude_pitch_rad=0.0,
             attitude_yaw_rad=yaw_rad,
             climb_rate_fraction=climb_rate_fraction,
+        )
+
+    @classmethod
+    def neutral_manual_control(
+        cls,
+        reason: str,
+        *,
+        active: bool = False,
+        throttle: float = 0.5,
+    ) -> "FollowCommand":
+        """Return neutral stick inputs for ``ALT_HOLD`` follow.
+
+        Args:
+            reason: Human-readable reason for the command.
+            active: Whether the command represents active tracking.
+            throttle: Normalized throttle in ``[0, 1]`` where ``0.5`` is
+                neutral climb in ``ALT_HOLD``.
+        """
+
+        return cls(
+            velocity_forward_m_s=0.0,
+            velocity_right_m_s=0.0,
+            velocity_down_m_s=0.0,
+            yaw_rate_rad_s=0.0,
+            active=active,
+            reason=reason,
+            command_type="manual_control",
+            manual_pitch=0.0,
+            manual_roll=0.0,
+            manual_throttle=throttle,
+            manual_yaw=0.0,
         )
 
 

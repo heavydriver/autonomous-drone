@@ -131,6 +131,14 @@ class ControlConfig:
     guided_nogps_attitude_slew_limit_deg_s: float = 8.0
     guided_nogps_yaw_slew_limit_deg_s: float = 12.0
     guided_nogps_neutral_climb_rate_fraction: float = 0.5
+    alt_hold_pitch_gain: float = 6.0
+    alt_hold_roll_gain: float = 0.0
+    alt_hold_yaw_gain: float = 1.5
+    alt_hold_max_pitch_stick: float = 0.30
+    alt_hold_max_roll_stick: float = 0.20
+    alt_hold_max_yaw_stick: float = 0.25
+    alt_hold_stick_slew_rate_per_s: float = 0.8
+    alt_hold_neutral_throttle: float = 0.5
 
 
 @dataclass(slots=True)

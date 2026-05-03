@@ -1,4 +1,4 @@
-"""pymavlink integration for ArduPilot Guided and Guided_NoGPS control."""
+"""pymavlink integration for ArduPilot Guided and no-GPS follow control."""
 
 from __future__ import annotations
 
@@ -110,6 +110,9 @@ class MavlinkFollowerClient:
         if command.command_type == "attitude":
             self._send_attitude_command(command)
             return
+        if command.command_type == "manual_control":
+            self._send_manual_control_command(command)
+            return
         self._send_velocity_command(command)
 
     def send_zero_once(self, reason: str = "stopping autonomy") -> None:
@@ -122,6 +125,12 @@ class MavlinkFollowerClient:
                 FollowCommand.neutral_attitude(
                     reason=reason,
                     yaw_rad=self._state.yaw_rad,
+                )
+            )
+        elif self._last_command_type == "manual_control":
+            self.send_follow_command(
+                FollowCommand.neutral_manual_control(
+                    reason=reason,
                 )
             )
         else:
@@ -194,6 +203,33 @@ class MavlinkFollowerClient:
             or abs(command.climb_rate_fraction - 0.5) > 1e-6
         )
 
+    def _send_manual_control_command(self, command: FollowCommand) -> None:
+        """Send normalized pilot stick inputs for ``ALT_HOLD`` follow."""
+
+        if (
+            command.manual_pitch is None
+            or command.manual_roll is None
+            or command.manual_throttle is None
+            or command.manual_yaw is None
+        ):
+            raise ValueError("Manual-control follow command is missing stick fields")
+
+        self._master.mav.manual_control_send(
+            self._master.target_system,
+            _scale_manual_axis(command.manual_pitch),
+            _scale_manual_axis(command.manual_roll),
+            _scale_manual_throttle(command.manual_throttle),
+            _scale_manual_axis(command.manual_yaw),
+            0,
+        )
+        self._last_command_type = "manual_control"
+        self._sent_nonzero_command = (
+            abs(command.manual_pitch) > 1e-6
+            or abs(command.manual_roll) > 1e-6
+            or abs(command.manual_yaw) > 1e-6
+            or abs(command.manual_throttle - 0.5) > 1e-6
+        )
+
     def _request_streams(self) -> None:
         """Request telemetry streams from the autopilot."""
 
@@ -240,3 +276,16 @@ def _clamp_fraction(value: float) -> float:
     """Clamp a climb-rate or thrust fraction into the MAVLink-supported range."""
 
     return max(0.0, min(1.0, value))
+
+
+def _scale_manual_axis(value: float) -> int:
+    """Scale a normalized axis from ``[-1, 1]`` to MAVLink MANUAL_CONTROL units."""
+
+    clamped = max(-1.0, min(1.0, value))
+    return int(round(clamped * 1000.0))
+
+
+def _scale_manual_throttle(value: float) -> int:
+    """Scale normalized throttle from ``[0, 1]`` to MAVLink MANUAL_CONTROL units."""
+
+    return int(round(_clamp_fraction(value) * 1000.0))

@@ -13,11 +13,11 @@ from autonomous_drone.config import (
     TrackingConfig,
 )
 from autonomous_drone.control import (
+    AltHoldFollowController,
     FollowController,
-    GuidedNoGpsFollowController,
     OrbitController,
 )
-from autonomous_drone.models import BoundingBox, TargetObservation, VehicleState
+from autonomous_drone.models import BoundingBox, TargetObservation
 
 
 class FollowControllerTest(unittest.TestCase):
@@ -248,8 +248,8 @@ class OrbitControllerTest(unittest.TestCase):
         self.assertIn("disabled", self.controller.status.reason)
 
 
-class GuidedNoGpsFollowControllerTest(unittest.TestCase):
-    """Validate conservative GUIDED_NOGPS attitude-follow behavior."""
+class AltHoldFollowControllerTest(unittest.TestCase):
+    """Validate conservative ``ALT_HOLD`` stick-follow behavior."""
 
     def setUp(self) -> None:
         self.camera = CameraConfig(
@@ -269,18 +269,17 @@ class GuidedNoGpsFollowControllerTest(unittest.TestCase):
             loop_rate_hz=10.0,
             yaw_deadband_deg=4.0,
             box_area_deadband_ratio=0.012,
-            guided_nogps_pitch_gain=0.30,
-            guided_nogps_max_pitch_deg=6.0,
-            guided_nogps_max_yaw_step_deg=12.0,
-            guided_nogps_attitude_slew_limit_deg_s=8.0,
-            guided_nogps_yaw_slew_limit_deg_s=12.0,
+            alt_hold_pitch_gain=8.0,
+            alt_hold_yaw_gain=2.0,
+            alt_hold_max_pitch_stick=0.35,
+            alt_hold_max_yaw_stick=0.30,
+            alt_hold_stick_slew_rate_per_s=1.0,
         )
-        self.controller = GuidedNoGpsFollowController(
+        self.controller = AltHoldFollowController(
             self.camera,
             self.tracking,
             self.control,
         )
-        self.vehicle_state = VehicleState(yaw_rad=0.0)
 
     def _make_observation(
         self,
@@ -305,8 +304,8 @@ class GuidedNoGpsFollowControllerTest(unittest.TestCase):
             timestamp_s=timestamp_s,
         )
 
-    def test_centered_target_holds_level_attitude(self) -> None:
-        """A centered target should converge to a near-level attitude command."""
+    def test_centered_target_holds_neutral_sticks(self) -> None:
+        """A centered target should converge to near-neutral stick inputs."""
 
         box_area = (
             self.camera.width
@@ -328,16 +327,15 @@ class GuidedNoGpsFollowControllerTest(unittest.TestCase):
                 observation,
                 now_s,
                 follow_allowed=True,
-                vehicle_state=self.vehicle_state,
             )
             now_s += 0.1
 
-        self.assertEqual(command.command_type, "attitude")
+        self.assertEqual(command.command_type, "manual_control")
         self.assertTrue(command.active)
-        self.assertAlmostEqual(command.attitude_roll_rad or 0.0, 0.0, places=3)
-        self.assertAlmostEqual(command.attitude_pitch_rad or 0.0, 0.0, places=3)
-        self.assertAlmostEqual(command.attitude_yaw_rad or 0.0, 0.0, places=3)
-        self.assertAlmostEqual(command.climb_rate_fraction or 0.0, 0.5, places=3)
+        self.assertAlmostEqual(command.manual_roll or 0.0, 0.0, places=3)
+        self.assertAlmostEqual(command.manual_pitch or 0.0, 0.0, places=3)
+        self.assertAlmostEqual(command.manual_yaw or 0.0, 0.0, places=3)
+        self.assertAlmostEqual(command.manual_throttle or 0.0, 0.5, places=3)
 
     def test_off_center_target_commands_yaw_and_pitch(self) -> None:
         """A small right-shifted target should bias yaw and pitch conservatively."""
@@ -359,21 +357,20 @@ class GuidedNoGpsFollowControllerTest(unittest.TestCase):
                 observation,
                 now_s,
                 follow_allowed=True,
-                vehicle_state=self.vehicle_state,
             )
             now_s += 0.1
 
         assert command is not None
-        self.assertEqual(command.command_type, "attitude")
-        self.assertGreater(command.attitude_yaw_rad or 0.0, 0.0)
-        self.assertLess(command.attitude_pitch_rad or 0.0, 0.0)
+        self.assertEqual(command.command_type, "manual_control")
+        self.assertGreater(command.manual_yaw or 0.0, 0.0)
+        self.assertGreater(command.manual_pitch or 0.0, 0.0)
         self.assertLessEqual(
-            abs(command.attitude_pitch_rad or 0.0),
-            math.radians(self.control.guided_nogps_max_pitch_deg),
+            abs(command.manual_pitch or 0.0),
+            self.control.alt_hold_max_pitch_stick,
         )
 
-    def test_target_loss_levels_the_vehicle(self) -> None:
-        """When the target is lost the controller should return toward level hold."""
+    def test_target_loss_returns_neutral_sticks(self) -> None:
+        """When the target is lost the controller should return toward neutral."""
 
         box_area = self.camera.width * self.camera.height * 0.03
         box_side = math.sqrt(box_area)
@@ -391,7 +388,6 @@ class GuidedNoGpsFollowControllerTest(unittest.TestCase):
                 observation,
                 now_s,
                 follow_allowed=True,
-                vehicle_state=self.vehicle_state,
             )
             now_s += 0.1
 
@@ -399,13 +395,12 @@ class GuidedNoGpsFollowControllerTest(unittest.TestCase):
             None,
             now_s + 0.7,
             follow_allowed=True,
-            vehicle_state=self.vehicle_state,
         )
-        self.assertEqual(lost_command.command_type, "attitude")
+        self.assertEqual(lost_command.command_type, "manual_control")
         self.assertFalse(lost_command.active)
         self.assertLessEqual(
-            abs(lost_command.attitude_pitch_rad or 0.0),
-            abs(command.attitude_pitch_rad or 0.0),
+            abs(lost_command.manual_pitch or 0.0),
+            abs(command.manual_pitch or 0.0),
         )
         self.assertIn("lost", lost_command.reason)
 

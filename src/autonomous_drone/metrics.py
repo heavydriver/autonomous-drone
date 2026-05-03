@@ -135,6 +135,10 @@ class CsvRunLogger:
         "command_attitude_pitch_rad",
         "command_attitude_yaw_rad",
         "command_climb_rate_fraction",
+        "command_manual_pitch",
+        "command_manual_roll",
+        "command_manual_throttle",
+        "command_manual_yaw",
         "vehicle_mode",
         "vehicle_armed",
         "vehicle_roll_rad",
@@ -437,6 +441,10 @@ class CsvRunLogger:
                 "command_attitude_pitch_rad": command.attitude_pitch_rad,
                 "command_attitude_yaw_rad": command.attitude_yaw_rad,
                 "command_climb_rate_fraction": command.climb_rate_fraction,
+                "command_manual_pitch": command.manual_pitch,
+                "command_manual_roll": command.manual_roll,
+                "command_manual_throttle": command.manual_throttle,
+                "command_manual_yaw": command.manual_yaw,
                 "vehicle_mode": vehicle_state.mode if vehicle_state is not None else None,
                 "vehicle_armed": (
                     vehicle_state.armed if vehicle_state is not None else None
