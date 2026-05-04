@@ -281,11 +281,6 @@ class MavlinkFollowerClient:
                 trim_pwm=self._config.rc_override_trim_pwm,
                 max_pwm=self._config.rc_override_max_pwm,
             ),
-            self._config.rc_override_throttle_channel: _scale_manual_throttle_to_pwm(
-                command.manual_throttle,
-                min_pwm=self._config.rc_override_min_pwm,
-                max_pwm=self._config.rc_override_max_pwm,
-            ),
             self._config.rc_override_yaw_channel: _scale_manual_axis_to_pwm(
                 command.manual_yaw,
                 min_pwm=self._config.rc_override_min_pwm,
@@ -293,6 +288,14 @@ class MavlinkFollowerClient:
                 max_pwm=self._config.rc_override_max_pwm,
             ),
         }
+        if self._config.alt_hold_override_throttle:
+            overrides[self._config.rc_override_throttle_channel] = (
+                _scale_manual_throttle_to_pwm(
+                    command.manual_throttle,
+                    min_pwm=self._config.rc_override_min_pwm,
+                    max_pwm=self._config.rc_override_max_pwm,
+                )
+            )
         self._send_rc_override_payload(overrides)
         self._last_command_type = "manual_control"
         self._last_manual_transport = "rc_override"
@@ -581,4 +584,10 @@ def _manual_control_preflight_warnings(
                     "Update the config rc_override_*_channel values or switch to "
                     "MANUAL_CONTROL for no-GPS follow."
                 )
+    elif not config.alt_hold_override_throttle:
+        warnings.append(
+            "Pilot throttle passthrough is enabled, but the app is using "
+            "MANUAL_CONTROL. That transport always sends throttle, so manual altitude "
+            "control requires RC_CHANNELS_OVERRIDE transport."
+        )
     return warnings

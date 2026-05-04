@@ -72,6 +72,7 @@ class ConfigLoadTest(unittest.TestCase):
 
         self.assertEqual(config.guided_nogps_mode_name, "ALT_HOLD")
         self.assertTrue(config.alt_hold_use_rc_overrides)
+        self.assertTrue(config.alt_hold_override_throttle)
         self.assertEqual(config.source_system, 255)
         self.assertEqual(config.source_component, 0)
 

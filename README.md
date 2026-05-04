@@ -73,6 +73,7 @@ Useful flags:
 - `--dry-run` runs detection, tracking, and control without sending MAVLink commands
 - `--enable-guided-nogps-follow` enables the no-GPS `ALT_HOLD` stick-control path
 - `--disable-alt-hold-rc-overrides` forces the no-GPS path to use `MANUAL_CONTROL` instead of `RC_CHANNELS_OVERRIDE`
+- `--allow-pilot-throttle-in-alt-hold` leaves throttle on the radio while follow still drives pitch/yaw via RC override
 - `--enable-hand-raise-circle` enables the optional pose-triggered one-shot orbit behavior
 - `--pose-model /path/to/yolo11n-pose.pt` points the gesture feature at YOLO pose weights
 - `--visualize` shows the detection box, target ID, `area_ratio`, and command overlay
@@ -233,6 +234,16 @@ python -m autonomous_drone.app \
   --config ../configs/real_drone_uart.example.json \
   --enable-guided-nogps-follow \
   --disable-alt-hold-rc-overrides
+```
+
+If you want to keep manual altitude control in `ALT_HOLD`, leave RC override transport enabled and allow pilot throttle passthrough:
+
+```bash
+cd src
+python -m autonomous_drone.app \
+  --config ../configs/real_drone_uart.example.json \
+  --enable-guided-nogps-follow \
+  --allow-pilot-throttle-in-alt-hold
 ```
 
 ## Notes

@@ -139,6 +139,7 @@ class AppCliConfigTest(unittest.TestCase):
                 "--source-component",
                 "9",
                 "--disable-alt-hold-rc-overrides",
+                "--allow-pilot-throttle-in-alt-hold",
             ]
         )
 
@@ -147,6 +148,7 @@ class AppCliConfigTest(unittest.TestCase):
         self.assertEqual(config.mavlink.source_system, 42)
         self.assertEqual(config.mavlink.source_component, 9)
         self.assertFalse(config.mavlink.alt_hold_use_rc_overrides)
+        self.assertFalse(config.mavlink.alt_hold_override_throttle)
 
 
 class _FakeFrame:

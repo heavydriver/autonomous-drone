@@ -132,6 +132,32 @@ class MavlinkManualControlTransportTest(unittest.TestCase):
             (1, 1, 0, 0, 0, 0, 65535, 65535, 65535, 65535),
         )
 
+    def test_active_alt_hold_command_can_leave_throttle_with_pilot(self) -> None:
+        """RC override transport can omit throttle so ALT_HOLD stays pilot-controlled."""
+
+        client = self._make_client()
+        client._config.alt_hold_override_throttle = False
+        command = FollowCommand(
+            velocity_forward_m_s=0.0,
+            velocity_right_m_s=0.0,
+            velocity_down_m_s=0.0,
+            yaw_rate_rad_s=0.0,
+            active=True,
+            reason="track",
+            command_type="manual_control",
+            manual_pitch=0.25,
+            manual_roll=-0.10,
+            manual_throttle=0.50,
+            manual_yaw=0.20,
+        )
+
+        client.send_follow_command(command)
+
+        self.assertEqual(
+            client._master.mav.rc_override_calls[0],
+            (1, 1, 1450, 1625, 65535, 1600, 65535, 65535, 65535, 65535),
+        )
+
     def test_send_zero_once_releases_prior_rc_overrides(self) -> None:
         """Gating a moving no-GPS follower off should release the stick channels."""
 
@@ -289,6 +315,21 @@ class ManualControlPreflightWarningsTest(unittest.TestCase):
         self.assertEqual(len(warnings), 2)
         self.assertTrue(any("roll" in warning for warning in warnings))
         self.assertTrue(any("pitch" in warning for warning in warnings))
+
+    def test_warns_when_manual_control_cannot_pass_through_throttle(self) -> None:
+        """Throttle passthrough requires RC override transport."""
+
+        warnings = _manual_control_preflight_warnings(
+            MavlinkConfig(
+                alt_hold_use_rc_overrides=False,
+                alt_hold_override_throttle=False,
+            ),
+            using_rc_overrides=False,
+            parameters={},
+        )
+
+        self.assertEqual(len(warnings), 1)
+        self.assertIn("manual altitude control", warnings[0])
 
 
 if __name__ == "__main__":

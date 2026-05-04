@@ -53,6 +53,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--skip-rc-gate", action="store_true")
     parser.add_argument("--enable-guided-nogps-follow", action="store_true")
     parser.add_argument("--disable-alt-hold-rc-overrides", action="store_true")
+    parser.add_argument("--allow-pilot-throttle-in-alt-hold", action="store_true")
     parser.add_argument("--visualize", action="store_true")
     parser.add_argument("--log-data", action="store_true")
     parser.add_argument("--log-output-dir")
@@ -118,6 +119,8 @@ def build_config(args: argparse.Namespace) -> AppConfig:
         config.runtime.enable_guided_nogps_follow = True
     if args.disable_alt_hold_rc_overrides:
         config.mavlink.alt_hold_use_rc_overrides = False
+    if args.allow_pilot_throttle_in_alt_hold:
+        config.mavlink.alt_hold_override_throttle = False
     if args.visualize:
         config.runtime.visualize = True
     if args.log_data:

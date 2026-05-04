@@ -11,6 +11,7 @@
     "follow_enable_channel": 7,
     "follow_enable_high_pwm": 1800,
     "alt_hold_use_rc_overrides": true,
+    "alt_hold_override_throttle": true,
     "rc_override_roll_channel": 1,
     "rc_override_pitch_channel": 2,
     "rc_override_throttle_channel": 3,

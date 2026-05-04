@@ -37,6 +37,7 @@ class MavlinkConfig:
     follow_enable_channel: int = 7
     follow_enable_high_pwm: int = 1800
     alt_hold_use_rc_overrides: bool = True
+    alt_hold_override_throttle: bool = True
     rc_override_roll_channel: int = 1
     rc_override_pitch_channel: int = 2
     rc_override_throttle_channel: int = 3
