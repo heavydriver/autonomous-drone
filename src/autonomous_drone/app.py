@@ -39,6 +39,8 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--udp-port", type=int)
     parser.add_argument("--serial-device")
     parser.add_argument("--baud", type=int)
+    parser.add_argument("--source-system", type=int)
+    parser.add_argument("--source-component", type=int)
     parser.add_argument("--video-source")
     parser.add_argument("--video-backend", choices=("auto", "gstreamer"))
     parser.add_argument("--model")
@@ -50,6 +52,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--dry-run", action="store_true")
     parser.add_argument("--skip-rc-gate", action="store_true")
     parser.add_argument("--enable-guided-nogps-follow", action="store_true")
+    parser.add_argument("--disable-alt-hold-rc-overrides", action="store_true")
     parser.add_argument("--visualize", action="store_true")
     parser.add_argument("--log-data", action="store_true")
     parser.add_argument("--log-output-dir")
@@ -87,6 +90,10 @@ def build_config(args: argparse.Namespace) -> AppConfig:
         config.mavlink.connection_string = None
     if args.baud is not None:
         config.mavlink.baud_rate = args.baud
+    if args.source_system is not None:
+        config.mavlink.source_system = args.source_system
+    if args.source_component is not None:
+        config.mavlink.source_component = args.source_component
     if args.model is not None:
         config.tracking.model_path = args.model
     if args.video_source is not None:
@@ -109,6 +116,8 @@ def build_config(args: argparse.Namespace) -> AppConfig:
         config.runtime.skip_rc_gate = True
     if args.enable_guided_nogps_follow:
         config.runtime.enable_guided_nogps_follow = True
+    if args.disable_alt_hold_rc_overrides:
+        config.mavlink.alt_hold_use_rc_overrides = False
     if args.visualize:
         config.runtime.visualize = True
     if args.log_data:
@@ -450,6 +459,14 @@ def run(config: AppConfig) -> int:
         mavlink = MavlinkFollowerClient(config.mavlink)
         mavlink.connect()
         if use_guided_nogps_follow:
+            print(
+                "[mavlink] ALT_HOLD manual-control transport "
+                f"{mavlink.manual_control_transport_name()} "
+                f"(source_sysid={config.mavlink.source_system}, "
+                f"source_compid={config.mavlink.source_component})"
+            )
+            for warning in mavlink.manual_control_preflight_warnings():
+                print(f"[mavlink][warn] {warning}")
             print(
                 "[mavlink] expecting flight mode "
                 f"{config.mavlink.guided_nogps_mode_name}"

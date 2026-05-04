@@ -68,9 +68,11 @@ Useful flags:
 
 - `--transport udp --udp-host 127.0.0.1 --udp-port 14550` selects a structured SITL endpoint
 - `--transport serial --serial-device /dev/ttyUSB0 --baud 921600` selects a UART-connected flight controller
+- `--source-system 255 --source-component 0` sets the MAVLink sender IDs used for RC override and `MANUAL_CONTROL`
 - `--skip-rc-gate` lets you test in `GUIDED` mode without needing the RC switch in SITL
 - `--dry-run` runs detection, tracking, and control without sending MAVLink commands
 - `--enable-guided-nogps-follow` enables the no-GPS `ALT_HOLD` stick-control path
+- `--disable-alt-hold-rc-overrides` forces the no-GPS path to use `MANUAL_CONTROL` instead of `RC_CHANNELS_OVERRIDE`
 - `--enable-hand-raise-circle` enables the optional pose-triggered one-shot orbit behavior
 - `--pose-model /path/to/yolo11n-pose.pt` points the gesture feature at YOLO pose weights
 - `--visualize` shows the detection box, target ID, `area_ratio`, and command overlay
@@ -216,6 +218,22 @@ python -m autonomous_drone.app \
 ```
 
 For no-GPS `ALT_HOLD` follow on a real drone, the app now prefers `RC_CHANNELS_OVERRIDE` for the primary roll, pitch, throttle, and yaw inputs. That tends to be more reliable than `MANUAL_CONTROL` on direct companion-computer links and lets the app release those channels immediately when follow is disabled or the target is lost.
+
+At startup, the app now prints a no-GPS control transport summary and checks a few ArduPilot parameters that commonly cause bench-test confusion:
+
+- `RC_OPTIONS` bit 1 makes ArduPilot ignore `RC_CHANNELS_OVERRIDE`
+- `MAV_OPTIONS` bit 0 plus a mismatched `MAV_GCS_SYSID` / `MAV_GCS_SYSID_HI` range makes ArduPilot ignore both RC overrides and `MANUAL_CONTROL`
+- `RCMAP_ROLL`, `RCMAP_PITCH`, `RCMAP_THROTTLE`, and `RCMAP_YAW` can make fixed RC override channel numbers hit the wrong pilot axes
+
+If RC overrides are blocked, you can bench-test the fallback path with:
+
+```bash
+cd src
+python -m autonomous_drone.app \
+  --config ../configs/real_drone_uart.example.json \
+  --enable-guided-nogps-follow \
+  --disable-alt-hold-rc-overrides
+```
 
 ## Notes
 

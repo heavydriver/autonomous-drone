@@ -7,6 +7,7 @@ import unittest
 from autonomous_drone.config import MavlinkConfig
 from autonomous_drone.mavlink import (
     MavlinkFollowerClient,
+    _manual_control_preflight_warnings,
     _scale_manual_axis_to_pwm,
     _scale_manual_throttle_to_pwm,
 )
@@ -236,6 +237,58 @@ class MavlinkScalingTest(unittest.TestCase):
             ),
             2000,
         )
+
+
+class ManualControlPreflightWarningsTest(unittest.TestCase):
+    """Validate startup diagnostics for no-GPS pilot-input transport."""
+
+    def test_warns_when_rc_overrides_are_disabled_in_ardupilot(self) -> None:
+        """RC_OPTIONS bit 1 should produce a concrete fallback warning."""
+
+        warnings = _manual_control_preflight_warnings(
+            MavlinkConfig(),
+            using_rc_overrides=True,
+            parameters={"RC_OPTIONS": 2.0},
+        )
+
+        self.assertEqual(len(warnings), 1)
+        self.assertIn("RC_CHANNELS_OVERRIDE", warnings[0])
+        self.assertIn("--disable-alt-hold-rc-overrides", warnings[0])
+
+    def test_warns_when_gcs_sysid_filter_excludes_sender(self) -> None:
+        """MAV_OPTIONS gating should flag a source-system mismatch."""
+
+        warnings = _manual_control_preflight_warnings(
+            MavlinkConfig(source_system=42),
+            using_rc_overrides=False,
+            parameters={
+                "MAV_OPTIONS": 1.0,
+                "MAV_GCS_SYSID": 255.0,
+                "MAV_GCS_SYSID_HI": 0.0,
+            },
+        )
+
+        self.assertEqual(len(warnings), 1)
+        self.assertIn("source sysid=42", warnings[0])
+        self.assertIn("ignored", warnings[0])
+
+    def test_warns_when_rcmap_does_not_match_override_channels(self) -> None:
+        """Non-default RC mapping should be surfaced before flight testing."""
+
+        warnings = _manual_control_preflight_warnings(
+            MavlinkConfig(),
+            using_rc_overrides=True,
+            parameters={
+                "RCMAP_ROLL": 2.0,
+                "RCMAP_PITCH": 1.0,
+                "RCMAP_THROTTLE": 3.0,
+                "RCMAP_YAW": 4.0,
+            },
+        )
+
+        self.assertEqual(len(warnings), 2)
+        self.assertTrue(any("roll" in warning for warning in warnings))
+        self.assertTrue(any("pitch" in warning for warning in warnings))
 
 
 if __name__ == "__main__":

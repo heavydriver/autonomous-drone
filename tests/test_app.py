@@ -129,6 +129,25 @@ class AppCliConfigTest(unittest.TestCase):
 
         self.assertTrue(config.runtime.enable_guided_nogps_follow)
 
+    def test_manual_control_cli_overrides_apply_to_mavlink_config(self) -> None:
+        """ALT_HOLD transport flags should update the MAVLink config."""
+
+        args = parse_args(
+            [
+                "--source-system",
+                "42",
+                "--source-component",
+                "9",
+                "--disable-alt-hold-rc-overrides",
+            ]
+        )
+
+        config = build_config(args)
+
+        self.assertEqual(config.mavlink.source_system, 42)
+        self.assertEqual(config.mavlink.source_component, 9)
+        self.assertFalse(config.mavlink.alt_hold_use_rc_overrides)
+
 
 class _FakeFrame:
     """Minimal frame object exposing the shape OpenCV code expects."""

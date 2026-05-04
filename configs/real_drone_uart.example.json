@@ -6,6 +6,8 @@
     "transport": "serial",
     "serial_device": "/dev/ttyYOUR_UART_DEVICE",
     "baud_rate": 921600,
+    "source_system": 255,
+    "source_component": 0,
     "follow_enable_channel": 7,
     "follow_enable_high_pwm": 1800,
     "alt_hold_use_rc_overrides": true,

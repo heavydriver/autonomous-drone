@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import inspect
 import math
+from collections.abc import Mapping
 from dataclasses import dataclass
 from time import monotonic
 
@@ -52,11 +53,14 @@ class MavlinkFollowerClient:
             config.resolved_connection_string(),
             baud=config.baud_rate,
             autoreconnect=True,
+            source_system=config.source_system,
+            source_component=config.source_component,
         )
         self._state = VehicleState()
         self._sent_nonzero_command = False
         self._last_command_type = "velocity_body"
         self._last_manual_transport = "manual_control"
+        self._parameter_cache: dict[str, float] = {}
 
     def connect(self, timeout_s: float = 30.0) -> None:
         """Wait for heartbeat and request telemetry streams."""
@@ -71,26 +75,44 @@ class MavlinkFollowerClient:
             message = self._master.recv_match(blocking=False)
             if message is None:
                 break
-            message_type = message.get_type()
-            if message_type == "BAD_DATA":
-                continue
-            if message_type == "HEARTBEAT":
-                self._state.mode = self._mavutil.mode_string_v10(message)
-                armed_flag = self._mavutil.mavlink.MAV_MODE_FLAG_SAFETY_ARMED
-                self._state.armed = bool(message.base_mode & armed_flag)
-                self._state.last_heartbeat_monotonic_s = monotonic()
-            elif message_type == "RC_CHANNELS":
-                rc_channels = {}
-                for channel in range(1, 19):
-                    rc_value = getattr(message, f"chan{channel}_raw", 0)
-                    if rc_value:
-                        rc_channels[channel] = int(rc_value)
-                self._state.rc_channels = rc_channels
-            elif message_type == "ATTITUDE":
-                self._state.roll_rad = float(message.roll)
-                self._state.pitch_rad = float(message.pitch)
-                self._state.yaw_rad = float(message.yaw)
+            self._handle_message(message)
         return self._state
+
+    def manual_control_transport_name(self) -> str:
+        """Return the active transport name for no-GPS stick control."""
+
+        if self._use_rc_overrides_for_manual_control():
+            return "RC_CHANNELS_OVERRIDE"
+        return "MANUAL_CONTROL"
+
+    def manual_control_preflight_warnings(self) -> list[str]:
+        """Return warnings for common ArduPilot RC-input rejection causes."""
+
+        parameter_names = [
+            "MAV_GCS_SYSID",
+            "MAV_GCS_SYSID_HI",
+            "MAV_OPTIONS",
+            "RC_OPTIONS",
+        ]
+        if self._config.alt_hold_use_rc_overrides:
+            parameter_names.extend(
+                (
+                    "RCMAP_ROLL",
+                    "RCMAP_PITCH",
+                    "RCMAP_THROTTLE",
+                    "RCMAP_YAW",
+                )
+            )
+        parameters = {
+            name: value
+            for name in parameter_names
+            if (value := self._fetch_parameter_value(name)) is not None
+        }
+        return _manual_control_preflight_warnings(
+            self._config,
+            using_rc_overrides=self._use_rc_overrides_for_manual_control(),
+            parameters=parameters,
+        )
 
     def compute_follow_gate(self, expected_mode_name: str | None = None) -> FollowGate:
         """Compute whether follow autonomy is allowed from mode and RC state."""
@@ -340,6 +362,69 @@ class MavlinkFollowerClient:
             1,
         )
 
+    def _handle_message(self, message: object) -> None:
+        """Update cached state from a received MAVLink message."""
+
+        message_type = message.get_type()
+        if message_type == "BAD_DATA":
+            return
+        if message_type == "HEARTBEAT":
+            self._state.mode = self._mavutil.mode_string_v10(message)
+            armed_flag = self._mavutil.mavlink.MAV_MODE_FLAG_SAFETY_ARMED
+            self._state.armed = bool(message.base_mode & armed_flag)
+            self._state.last_heartbeat_monotonic_s = monotonic()
+            return
+        if message_type == "RC_CHANNELS":
+            rc_channels = {}
+            for channel in range(1, 19):
+                rc_value = getattr(message, f"chan{channel}_raw", 0)
+                if rc_value:
+                    rc_channels[channel] = int(rc_value)
+            self._state.rc_channels = rc_channels
+            return
+        if message_type == "ATTITUDE":
+            self._state.roll_rad = float(message.roll)
+            self._state.pitch_rad = float(message.pitch)
+            self._state.yaw_rad = float(message.yaw)
+            return
+        if message_type == "PARAM_VALUE":
+            parameter_name = getattr(message, "param_id", "")
+            if isinstance(parameter_name, bytes):
+                parameter_name = parameter_name.decode("utf-8", errors="ignore")
+            parameter_name = str(parameter_name).rstrip("\x00").upper()
+            if parameter_name:
+                self._parameter_cache[parameter_name] = float(message.param_value)
+
+    def _fetch_parameter_value(
+        self,
+        name: str,
+        timeout_s: float = 1.0,
+    ) -> float | None:
+        """Fetch one parameter value from the autopilot if available."""
+
+        normalized_name = name.upper()
+        cached = self._parameter_cache.get(normalized_name)
+        if cached is not None:
+            return cached
+        if not hasattr(self._master, "param_fetch_one"):
+            return None
+
+        self._master.param_fetch_one(normalized_name)
+        deadline = monotonic() + max(timeout_s, 0.1)
+        while monotonic() < deadline:
+            remaining_s = max(deadline - monotonic(), 0.0)
+            message = self._master.recv_match(
+                blocking=True,
+                timeout=remaining_s,
+            )
+            if message is None:
+                continue
+            self._handle_message(message)
+            cached = self._parameter_cache.get(normalized_name)
+            if cached is not None:
+                return cached
+        return self._parameter_cache.get(normalized_name)
+
 
 def _euler_to_quaternion(
     roll_rad: float,
@@ -436,3 +521,64 @@ def _rc_override_release_value(channel: int) -> int:
     if channel <= 8:
         return 0
     return 65534
+
+
+def _manual_control_preflight_warnings(
+    config: MavlinkConfig,
+    *,
+    using_rc_overrides: bool,
+    parameters: Mapping[str, float],
+) -> list[str]:
+    """Return startup warnings for common ArduPilot RC-input pitfalls."""
+
+    warnings: list[str] = []
+    mav_options = int(round(parameters.get("MAV_OPTIONS", 0.0)))
+    accepted_gcs_sysid = int(round(parameters.get("MAV_GCS_SYSID", 255.0)))
+    accepted_gcs_sysid_hi = int(round(parameters.get("MAV_GCS_SYSID_HI", -1.0)))
+    if mav_options & 0x01:
+        if accepted_gcs_sysid_hi >= accepted_gcs_sysid:
+            sysid_ok = accepted_gcs_sysid <= config.source_system <= accepted_gcs_sysid_hi
+        else:
+            sysid_ok = config.source_system == accepted_gcs_sysid
+        if not sysid_ok:
+            accepted_text = (
+                str(accepted_gcs_sysid)
+                if accepted_gcs_sysid_hi < accepted_gcs_sysid
+                else f"{accepted_gcs_sysid}-{accepted_gcs_sysid_hi}"
+            )
+            warnings.append(
+                "ArduPilot is filtering MAVLink pilot-input messages by GCS "
+                f"sysid. MAV_OPTIONS bit 0 is set, source sysid={config.source_system}, "
+                f"accepted sysid range={accepted_text}. RC overrides and MANUAL_CONTROL "
+                "will be ignored until they match."
+            )
+
+    if using_rc_overrides:
+        rc_options = int(round(parameters.get("RC_OPTIONS", 0.0)))
+        if rc_options & 0x02:
+            warnings.append(
+                "RC_OPTIONS bit 1 is set, so ArduPilot will ignore "
+                "RC_CHANNELS_OVERRIDE messages. Disable that bit or run the app with "
+                "--disable-alt-hold-rc-overrides to use MANUAL_CONTROL instead."
+            )
+
+        rcmap_expectations = (
+            ("roll", "RCMAP_ROLL", config.rc_override_roll_channel),
+            ("pitch", "RCMAP_PITCH", config.rc_override_pitch_channel),
+            ("throttle", "RCMAP_THROTTLE", config.rc_override_throttle_channel),
+            ("yaw", "RCMAP_YAW", config.rc_override_yaw_channel),
+        )
+        for axis_name, parameter_name, configured_channel in rcmap_expectations:
+            mapped_channel = parameters.get(parameter_name)
+            if mapped_channel is None:
+                continue
+            mapped_channel_int = int(round(mapped_channel))
+            if mapped_channel_int != configured_channel:
+                warnings.append(
+                    "RC override channel mapping mismatch: "
+                    f"{axis_name} is mapped to RC channel {mapped_channel_int} in "
+                    f"ArduPilot, but the app is overriding channel {configured_channel}. "
+                    "Update the config rc_override_*_channel values or switch to "
+                    "MANUAL_CONTROL for no-GPS follow."
+                )
+    return warnings

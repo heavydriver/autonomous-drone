@@ -29,6 +29,8 @@ class MavlinkConfig:
     udp_port: int = 14550
     serial_device: str = "/dev/serial0"
     baud_rate: int = 57600
+    source_system: int = 255
+    source_component: int = 0
     stream_rate_hz: int = 10
     guided_mode_name: str = "GUIDED"
     guided_nogps_mode_name: str = "ALT_HOLD"
