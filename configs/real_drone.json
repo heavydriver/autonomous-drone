@@ -12,14 +12,14 @@
     "stream_rate_hz": 10
   },
   "tracking": {
-    "model_path": "/home/radxa/autonomous-drone/yolo11n-custom_ncnn_model",
+    "model_path": "/home/radxa/autonomous-drone/yolo11n_ncnn_model",
     "detector_confidence": 0.4,
-    "min_box_area_ratio": 0.005,
-    "desired_box_area_ratio": 0.08,
-    "emergency_stop_area_ratio": 0.18,
+    "min_box_area_ratio": 0.002,
+    "desired_box_area_ratio": 0.1,
+    "emergency_stop_area_ratio": 0.3,
     "loss_timeout_s": 0.6,
     "acquisition_confirm_frames": 3,
-    "tracker_frame_rate": 10.0,
+    "tracker_frame_rate": 20.0,
     "tracker_track_buffer": 30,
     "tracker_match_thresh": 0.8,
     "selector_reacquire_min_iou": 0.05,
@@ -46,7 +46,7 @@
     "enable_lateral_motion": false
   },
   "safety": {
-    "stand_off_distance_m": 4.0,
+    "stand_off_distance_m": 3,
     "hold_altitude_m": 2.4,
     "max_roll_pitch_deg": 10.0
   },
