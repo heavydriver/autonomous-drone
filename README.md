@@ -215,6 +215,8 @@ python -m autonomous_drone.app \
   --baud 921600
 ```
 
+For no-GPS `ALT_HOLD` follow on a real drone, the app now prefers `RC_CHANNELS_OVERRIDE` for the primary roll, pitch, throttle, and yaw inputs. That tends to be more reliable than `MANUAL_CONTROL` on direct companion-computer links and lets the app release those channels immediately when follow is disabled or the target is lost.
+
 ## Notes
 
 - The app expects a local YOLO weights file and does not download one automatically.

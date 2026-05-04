@@ -8,6 +8,11 @@
     "baud_rate": 921600,
     "follow_enable_channel": 7,
     "follow_enable_high_pwm": 1800,
+    "alt_hold_use_rc_overrides": true,
+    "rc_override_roll_channel": 1,
+    "rc_override_pitch_channel": 2,
+    "rc_override_throttle_channel": 3,
+    "rc_override_yaw_channel": 4,
     "guided_mode_name": "GUIDED",
     "stream_rate_hz": 10
   },

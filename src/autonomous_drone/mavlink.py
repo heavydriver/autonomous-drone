@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import inspect
 import math
 from dataclasses import dataclass
 from time import monotonic
@@ -55,6 +56,7 @@ class MavlinkFollowerClient:
         self._state = VehicleState()
         self._sent_nonzero_command = False
         self._last_command_type = "velocity_body"
+        self._last_manual_transport = "manual_control"
 
     def connect(self, timeout_s: float = 30.0) -> None:
         """Wait for heartbeat and request telemetry streams."""
@@ -111,12 +113,15 @@ class MavlinkFollowerClient:
             self._send_attitude_command(command)
             return
         if command.command_type == "manual_control":
+            if not command.active and self._use_rc_overrides_for_manual_control():
+                self._release_rc_overrides()
+                return
             self._send_manual_control_command(command)
             return
         self._send_velocity_command(command)
 
     def send_zero_once(self, reason: str = "stopping autonomy") -> None:
-        """Send a single neutral command if the client was previously moving the drone."""
+        """Stop the previous command once, or release RC overrides if applicable."""
 
         if not self._sent_nonzero_command:
             return
@@ -128,11 +133,14 @@ class MavlinkFollowerClient:
                 )
             )
         elif self._last_command_type == "manual_control":
-            self.send_follow_command(
-                FollowCommand.neutral_manual_control(
-                    reason=reason,
+            if self._last_manual_transport == "rc_override":
+                self._release_rc_overrides()
+            else:
+                self.send_follow_command(
+                    FollowCommand.neutral_manual_control(
+                        reason=reason,
+                    )
                 )
-            )
         else:
             self.send_follow_command(FollowCommand.zero(reason=reason))
         self._sent_nonzero_command = False
@@ -214,6 +222,10 @@ class MavlinkFollowerClient:
         ):
             raise ValueError("Manual-control follow command is missing stick fields")
 
+        if self._use_rc_overrides_for_manual_control():
+            self._send_rc_override_command(command)
+            return
+
         self._master.mav.manual_control_send(
             self._master.target_system,
             _scale_manual_axis(command.manual_pitch),
@@ -223,11 +235,98 @@ class MavlinkFollowerClient:
             0,
         )
         self._last_command_type = "manual_control"
+        self._last_manual_transport = "manual_control"
         self._sent_nonzero_command = (
             abs(command.manual_pitch) > 1e-6
             or abs(command.manual_roll) > 1e-6
             or abs(command.manual_yaw) > 1e-6
             or abs(command.manual_throttle - 0.5) > 1e-6
+        )
+
+    def _send_rc_override_command(self, command: FollowCommand) -> None:
+        """Send ``ALT_HOLD`` stick inputs as RC channel overrides."""
+
+        overrides = {
+            self._config.rc_override_roll_channel: _scale_manual_axis_to_pwm(
+                command.manual_roll,
+                min_pwm=self._config.rc_override_min_pwm,
+                trim_pwm=self._config.rc_override_trim_pwm,
+                max_pwm=self._config.rc_override_max_pwm,
+            ),
+            self._config.rc_override_pitch_channel: _scale_manual_axis_to_pwm(
+                command.manual_pitch,
+                min_pwm=self._config.rc_override_min_pwm,
+                trim_pwm=self._config.rc_override_trim_pwm,
+                max_pwm=self._config.rc_override_max_pwm,
+            ),
+            self._config.rc_override_throttle_channel: _scale_manual_throttle_to_pwm(
+                command.manual_throttle,
+                min_pwm=self._config.rc_override_min_pwm,
+                max_pwm=self._config.rc_override_max_pwm,
+            ),
+            self._config.rc_override_yaw_channel: _scale_manual_axis_to_pwm(
+                command.manual_yaw,
+                min_pwm=self._config.rc_override_min_pwm,
+                trim_pwm=self._config.rc_override_trim_pwm,
+                max_pwm=self._config.rc_override_max_pwm,
+            ),
+        }
+        self._send_rc_override_payload(overrides)
+        self._last_command_type = "manual_control"
+        self._last_manual_transport = "rc_override"
+        self._sent_nonzero_command = (
+            abs(command.manual_pitch) > 1e-6
+            or abs(command.manual_roll) > 1e-6
+            or abs(command.manual_yaw) > 1e-6
+            or abs(command.manual_throttle - 0.5) > 1e-6
+        )
+
+    def _release_rc_overrides(self) -> None:
+        """Release any RC channels used for follow back to the pilot/receiver."""
+
+        release_values = {
+            self._config.rc_override_roll_channel: _rc_override_release_value(
+                self._config.rc_override_roll_channel
+            ),
+            self._config.rc_override_pitch_channel: _rc_override_release_value(
+                self._config.rc_override_pitch_channel
+            ),
+            self._config.rc_override_throttle_channel: _rc_override_release_value(
+                self._config.rc_override_throttle_channel
+            ),
+            self._config.rc_override_yaw_channel: _rc_override_release_value(
+                self._config.rc_override_yaw_channel
+            ),
+        }
+        self._send_rc_override_payload(release_values)
+        self._last_command_type = "manual_control"
+        self._last_manual_transport = "rc_override"
+        self._sent_nonzero_command = False
+
+    def _send_rc_override_payload(self, overrides: dict[int, int]) -> None:
+        """Transmit a sparse RC override payload using the supported field count."""
+
+        sender = self._master.mav.rc_channels_override_send
+        channel_field_count = _rc_override_channel_field_count(sender)
+        channel_values = [
+            _rc_override_ignore_value(channel_index)
+            for channel_index in range(1, channel_field_count + 1)
+        ]
+        for channel, value in overrides.items():
+            if 1 <= channel <= channel_field_count:
+                channel_values[channel - 1] = value
+        sender(
+            self._master.target_system,
+            self._master.target_component,
+            *channel_values,
+        )
+
+    def _use_rc_overrides_for_manual_control(self) -> bool:
+        """Return whether ``ALT_HOLD`` follow should drive sticks via RC override."""
+
+        return self._config.alt_hold_use_rc_overrides and hasattr(
+            self._master.mav,
+            "rc_channels_override_send",
         )
 
     def _request_streams(self) -> None:
@@ -289,3 +388,51 @@ def _scale_manual_throttle(value: float) -> int:
     """Scale normalized throttle from ``[0, 1]`` to MAVLink MANUAL_CONTROL units."""
 
     return int(round(_clamp_fraction(value) * 1000.0))
+
+
+def _scale_manual_axis_to_pwm(
+    value: float,
+    *,
+    min_pwm: int,
+    trim_pwm: int,
+    max_pwm: int,
+) -> int:
+    """Scale a normalized stick axis from ``[-1, 1]`` into RC override PWM."""
+
+    clamped = max(-1.0, min(1.0, value))
+    if clamped >= 0.0:
+        return int(round(trim_pwm + clamped * (max_pwm - trim_pwm)))
+    return int(round(trim_pwm + clamped * (trim_pwm - min_pwm)))
+
+
+def _scale_manual_throttle_to_pwm(
+    value: float,
+    *,
+    min_pwm: int,
+    max_pwm: int,
+) -> int:
+    """Scale normalized throttle from ``[0, 1]`` into RC override PWM."""
+
+    clamped = _clamp_fraction(value)
+    return int(round(min_pwm + clamped * (max_pwm - min_pwm)))
+
+
+def _rc_override_channel_field_count(sender: object) -> int:
+    """Return how many RC channel fields the bound sender accepts."""
+
+    parameters = tuple(inspect.signature(sender).parameters)
+    return max(0, len(parameters) - 2)
+
+
+def _rc_override_ignore_value(channel: int) -> int:
+    """Return the MAVLink 'ignore this RC channel' sentinel value."""
+
+    return 65535
+
+
+def _rc_override_release_value(channel: int) -> int:
+    """Return the MAVLink 'release this RC channel' sentinel value."""
+
+    if channel <= 8:
+        return 0
+    return 65534

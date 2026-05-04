@@ -34,6 +34,14 @@ class MavlinkConfig:
     guided_nogps_mode_name: str = "ALT_HOLD"
     follow_enable_channel: int = 7
     follow_enable_high_pwm: int = 1800
+    alt_hold_use_rc_overrides: bool = True
+    rc_override_roll_channel: int = 1
+    rc_override_pitch_channel: int = 2
+    rc_override_throttle_channel: int = 3
+    rc_override_yaw_channel: int = 4
+    rc_override_min_pwm: int = 1000
+    rc_override_trim_pwm: int = 1500
+    rc_override_max_pwm: int = 2000
 
     def resolved_connection_string(self) -> str:
         """Return the pymavlink connection string for the configured transport.

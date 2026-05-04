@@ -3,9 +3,9 @@
 from __future__ import annotations
 
 import json
-import tempfile
 import unittest
 from pathlib import Path
+from uuid import uuid4
 
 from autonomous_drone.config import MavlinkConfig, config_to_dict, load_config_file
 
@@ -26,10 +26,15 @@ class ConfigLoadTest(unittest.TestCase):
                 "enable_guided_nogps_follow": True,
             },
         }
-        with tempfile.TemporaryDirectory() as tmpdir:
-            config_path = Path(tmpdir) / "config.json"
+        scratch_dir = Path.cwd() / ".codex-tmp" / "unit-test-config"
+        scratch_dir.mkdir(parents=True, exist_ok=True)
+        config_path = scratch_dir / f"{uuid4().hex}.json"
+        try:
             config_path.write_text(json.dumps(payload), encoding="utf-8")
             config = load_config_file(config_path)
+        finally:
+            if config_path.exists():
+                config_path.unlink()
 
         config_dict = config_to_dict(config)
         self.assertEqual(config_dict["camera"]["mount_pitch_deg"], 12.5)
@@ -66,6 +71,7 @@ class ConfigLoadTest(unittest.TestCase):
         config = MavlinkConfig()
 
         self.assertEqual(config.guided_nogps_mode_name, "ALT_HOLD")
+        self.assertTrue(config.alt_hold_use_rc_overrides)
 
     def test_raw_connection_string_override_wins(self) -> None:
         """A raw pymavlink connection string should bypass transport synthesis."""
